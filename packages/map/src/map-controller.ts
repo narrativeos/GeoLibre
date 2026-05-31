@@ -24,7 +24,7 @@ import {
   mbtilesStyleLayerIds,
   removeLayerFromMap,
   syncLayer,
-  vectorTileLayerId,
+  vectorTileStyleLayerIds,
 } from "./layer-sync";
 
 const DEFAULT_PROJECTION: maplibregl.ProjectionSpecification = {
@@ -84,6 +84,18 @@ function nativeLayerSuffix(layerId: string): string | undefined {
   const suffix = layerId.split("-").pop();
   if (!suffix) return undefined;
   return suffix.charAt(0).toUpperCase() + suffix.slice(1);
+}
+
+function vectorTileLayerSuffix(layerId: string): string | undefined {
+  if (layerId.endsWith("-vector") || layerId.endsWith("-fill")) {
+    return "Polygons";
+  }
+  if (layerId.endsWith("-vector-extrusion") || layerId.endsWith("-extrusion")) {
+    return "Extrusions";
+  }
+  if (layerId.endsWith("-line")) return "Lines";
+  if (layerId.endsWith("-circle")) return "Points";
+  return nativeLayerSuffix(layerId);
 }
 
 function createBlankMapStyle(): maplibregl.StyleSpecification {
@@ -1101,10 +1113,10 @@ export class MapController {
     }
 
     if (layer.type === "vector-tiles") {
-      return [
-        { id: vectorTileLayerId(layer.id, true), suffix: "Extrusions" },
-        { id: vectorTileLayerId(layer.id), suffix: "Polygons" },
-      ];
+      return vectorTileStyleLayerIds(layer).map((id) => ({
+        id,
+        suffix: vectorTileLayerSuffix(id),
+      }));
     }
 
     if (layer.type === "mbtiles") {

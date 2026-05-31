@@ -354,39 +354,102 @@ function syncVectorTileLayer(
   if (!map.getSource(src)) {
     map.addSource(src, { type: "vector", url });
   }
-  const sourceLayer = (layer.source.sourceLayer as string) ?? "";
   const visibility = layer.visible ? "visible" : "none";
-  if (layer.style.extrusionEnabled) {
-    removeIfExists(map, vectorTileLayerId(layer.id));
-    ensureLayer(
-      map,
-      vectorTileLayerId(layer.id, true),
-      {
-        id: vectorTileLayerId(layer.id, true),
-        type: "fill-extrusion",
-        source: src,
-        "source-layer": sourceLayer,
-        paint: fillExtrusionPaint(layer.style, layer.opacity),
-        layout: { visibility },
-      },
-      beforeId,
-    );
-  } else {
-    removeIfExists(map, vectorTileLayerId(layer.id, true));
-    ensureLayer(
-      map,
-      vectorTileLayerId(layer.id),
-      {
-        id: vectorTileLayerId(layer.id),
-        type: "fill",
-        source: src,
-        "source-layer": sourceLayer,
-        paint: fillPaint(layer.style, layer.opacity),
-        layout: { visibility },
-      },
-      beforeId,
-    );
+  const sourceLayers = getVectorTileSourceLayers(layer);
+  const currentLayerIds = new Set(vectorTileStyleLayerIds(layer));
+
+  for (const sourceLayer of sourceLayers) {
+    const layerPart = vectorTileScopedSourceLayer(layer, sourceLayer);
+    if (layer.style.extrusionEnabled) {
+      removeIfExists(map, vectorTileLayerId(layer.id, false, layerPart));
+      removeIfExists(map, vectorTileLineLayerId(layer.id, layerPart));
+      removeIfExists(map, vectorTileCircleLayerId(layer.id, layerPart));
+      ensureLayer(
+        map,
+        vectorTileLayerId(layer.id, true, layerPart),
+        {
+          id: vectorTileLayerId(layer.id, true, layerPart),
+          type: "fill-extrusion",
+          source: src,
+          "source-layer": sourceLayer,
+          filter: [
+            "match",
+            ["geometry-type"],
+            ["Polygon", "MultiPolygon"],
+            true,
+            false,
+          ],
+          paint: fillExtrusionPaint(layer.style, layer.opacity),
+          layout: { visibility },
+        },
+        beforeId,
+      );
+    } else {
+      removeIfExists(map, vectorTileLayerId(layer.id, true, layerPart));
+      ensureLayer(
+        map,
+        vectorTileLayerId(layer.id, false, layerPart),
+        {
+          id: vectorTileLayerId(layer.id, false, layerPart),
+          type: "fill",
+          source: src,
+          "source-layer": sourceLayer,
+          filter: [
+            "match",
+            ["geometry-type"],
+            ["Polygon", "MultiPolygon"],
+            true,
+            false,
+          ],
+          paint: fillPaint(layer.style, layer.opacity),
+          layout: { visibility },
+        },
+        beforeId,
+      );
+      ensureLayer(
+        map,
+        vectorTileLineLayerId(layer.id, layerPart),
+        {
+          id: vectorTileLineLayerId(layer.id, layerPart),
+          type: "line",
+          source: src,
+          "source-layer": sourceLayer,
+          filter: [
+            "match",
+            ["geometry-type"],
+            ["LineString", "MultiLineString", "Polygon", "MultiPolygon"],
+            true,
+            false,
+          ],
+          paint: linePaint(layer.style, layer.opacity),
+          layout: { visibility },
+        },
+        beforeId,
+      );
+      ensureLayer(
+        map,
+        vectorTileCircleLayerId(layer.id, layerPart),
+        {
+          id: vectorTileCircleLayerId(layer.id, layerPart),
+          type: "circle",
+          source: src,
+          "source-layer": sourceLayer,
+          filter: [
+            "match",
+            ["geometry-type"],
+            ["Point", "MultiPoint"],
+            true,
+            false,
+          ],
+          paint: circlePaint(layer.style, layer.opacity),
+          layout: { visibility },
+        },
+        beforeId,
+      );
+    }
   }
+
+  removeStaleVectorTileLayers(map, layer.id, currentLayerIds);
 }
 
 function syncMbtilesLayer(
@@ -556,6 +619,10 @@ function encodeMbtilesLayerPart(value: string): string {
   return encodeURIComponent(value).replaceAll("%", "_");
 }
 
+function encodeVectorTileLayerPart(value: string): string {
+  return encodeURIComponent(value).replaceAll("%", "_");
+}
+
 export function mbtilesFillLayerId(
   layerId: string,
   sourceLayer: string,
@@ -616,8 +683,98 @@ export function mbtilesAllStyleLayerIds(layer: GeoLibreLayer): string[] {
 export function vectorTileLayerId(
   layerId: string,
   extrusionEnabled = false,
+  sourceLayer?: string,
 ): string {
+  if (sourceLayer) {
+    return `layer-${layerId}-vector-${encodeVectorTileLayerPart(sourceLayer)}-${extrusionEnabled ? "extrusion" : "fill"}`;
+  }
   return `layer-${layerId}-${extrusionEnabled ? "vector-extrusion" : "vector"}`;
+}
+
+export function vectorTileLineLayerId(
+  layerId: string,
+  sourceLayer?: string,
+): string {
+  if (sourceLayer) {
+    return `layer-${layerId}-vector-${encodeVectorTileLayerPart(sourceLayer)}-line`;
+  }
+  return `layer-${layerId}-vector-line`;
+}
+
+export function vectorTileCircleLayerId(
+  layerId: string,
+  sourceLayer?: string,
+): string {
+  if (sourceLayer) {
+    return `layer-${layerId}-vector-${encodeVectorTileLayerPart(sourceLayer)}-circle`;
+  }
+  return `layer-${layerId}-vector-circle`;
+}
+
+export function vectorTileStyleLayerIds(layer: GeoLibreLayer): string[] {
+  if (layer.type !== "vector-tiles") return [];
+  return getVectorTileSourceLayers(layer).flatMap((sourceLayer) => {
+    const layerPart = vectorTileScopedSourceLayer(layer, sourceLayer);
+    if (layer.style.extrusionEnabled) {
+      return [vectorTileLayerId(layer.id, true, layerPart)];
+    }
+    return [
+      vectorTileCircleLayerId(layer.id, layerPart),
+      vectorTileLineLayerId(layer.id, layerPart),
+      vectorTileLayerId(layer.id, false, layerPart),
+    ];
+  });
+}
+
+function vectorTileAllStyleLayerIds(layer: GeoLibreLayer): string[] {
+  if (layer.type !== "vector-tiles") return [];
+  return getVectorTileSourceLayers(layer).flatMap((sourceLayer) => {
+    const layerPart = vectorTileScopedSourceLayer(layer, sourceLayer);
+    return [
+      vectorTileCircleLayerId(layer.id, layerPart),
+      vectorTileLineLayerId(layer.id, layerPart),
+      vectorTileLayerId(layer.id, false, layerPart),
+      vectorTileLayerId(layer.id, true, layerPart),
+    ];
+  });
+}
+
+function getVectorTileSourceLayers(layer: GeoLibreLayer): string[] {
+  const sourceLayers = layer.source.sourceLayers ?? layer.metadata.sourceLayers;
+  if (Array.isArray(sourceLayers)) {
+    return sourceLayers.filter(
+      (sourceLayer): sourceLayer is string =>
+        typeof sourceLayer === "string" && sourceLayer.length > 0,
+    );
+  }
+
+  const sourceLayer = layer.source.sourceLayer;
+  return typeof sourceLayer === "string" && sourceLayer.length > 0
+    ? [sourceLayer]
+    : [];
+}
+
+function vectorTileScopedSourceLayer(
+  layer: GeoLibreLayer,
+  sourceLayer: string,
+): string | undefined {
+  return getVectorTileSourceLayers(layer).length > 1 ? sourceLayer : undefined;
+}
+
+function removeStaleVectorTileLayers(
+  map: maplibregl.Map,
+  layerId: string,
+  currentLayerIds: Set<string>,
+): void {
+  const prefix = `layer-${layerId}-vector`;
+  for (const styleLayer of map.getStyle().layers ?? []) {
+    if (
+      styleLayer.id.startsWith(prefix) &&
+      !currentLayerIds.has(styleLayer.id)
+    ) {
+      removeIfExists(map, styleLayer.id);
+    }
+  }
 }
 
 function ensureLayer(
@@ -678,6 +835,9 @@ export function removeLayerFromMap(
     lineLayerId(layerId),
     circleLayerId(layerId),
     `layer-${layerId}-raster`,
+    ...(layer ? vectorTileAllStyleLayerIds(layer) : []),
+    vectorTileCircleLayerId(layerId),
+    vectorTileLineLayerId(layerId),
     vectorTileLayerId(layerId),
     vectorTileLayerId(layerId, true),
   ]) {
