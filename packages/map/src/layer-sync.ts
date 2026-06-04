@@ -128,6 +128,17 @@ function syncExternalNativeLayer(
     ensurePMTilesExternalLayer(map, layer, nativeLayerIds, beforeId);
   }
 
+  // Custom render layers (e.g. 3D Tiles) manage their own visibility, opacity,
+  // and zoom behavior through the control that registered them, so the standard
+  // visibility/paint/zoom-range sync below must be skipped — only ordering is
+  // handled here.
+  if (isExternalCustomLayer(layer)) {
+    for (const nativeLayerId of nativeLayerIds) {
+      moveLayer(map, nativeLayerId, beforeId);
+    }
+    return;
+  }
+
   if (isWaybackExternalRasterLayer(layer)) {
     syncWaybackExternalRasterLayer(map, layer, nativeLayerIds, beforeId);
     return;
@@ -204,6 +215,10 @@ function isPMTilesExternalLayer(layer: GeoLibreLayer): boolean {
     layer.metadata.sourceKind === "pmtiles-url" &&
     layer.metadata.externalNativeLayer === true
   );
+}
+
+function isExternalCustomLayer(layer: GeoLibreLayer): boolean {
+  return typeof layer.metadata.customLayerType === "string";
 }
 
 function ensurePMTilesExternalLayer(
