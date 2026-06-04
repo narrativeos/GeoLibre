@@ -1,6 +1,7 @@
 import { useAppStore } from "@geolibre/core";
 import type { MapController } from "@geolibre/map";
 import { MapCanvas } from "@geolibre/map";
+import { restoreThreeDTilesLayers } from "@geolibre/plugins";
 import {
   type CSSProperties,
   type DragEvent,
@@ -144,10 +145,12 @@ export function DesktopShell({
       !mapControllerRef.current
     )
       return;
+    const appAPI = createAppAPI(mapControllerRef);
     getPluginManager().restoreProjectState(
       useAppStore.getState().projectPlugins,
-      createAppAPI(mapControllerRef),
+      appAPI,
     );
+    restoreThreeDTilesLayers(appAPI);
   }, [externalPluginsReady, mapReadyGeneration, projectGeneration]);
 
   useEffect(() => {
