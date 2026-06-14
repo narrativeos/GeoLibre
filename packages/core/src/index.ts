@@ -1,5 +1,6 @@
 export * from "./types";
 export * from "./color-ramp";
+export * from "./routing";
 export * from "./vector-color";
 export * from "./project";
 export * from "./layer-groups";
@@ -18,6 +19,7 @@ export {
   useAppStore,
   type AppState,
   type ConversionToolKind,
+  type NetworkToolKind,
   type RasterToolKind,
   type VectorToolKind,
 } from "./store";
