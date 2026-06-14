@@ -3,7 +3,12 @@ import { v4 as uuidv4 } from "uuid";
 import { create } from "zustand";
 import { shallow } from "zustand/shallow";
 import { temporal } from "zundo";
-import { getHistoryCoalesceMs, leadingDebounce } from "./history";
+import {
+  getHistoryCoalesceMs,
+  getMaxHistoryFeatureCount,
+  leadingDebounce,
+  trimHistoryBySize,
+} from "./history";
 import {
   applyProjectToStore,
   type CreateProjectOptions,
@@ -326,6 +331,22 @@ function layerGroupsEqualForHistory(
 
 /** Cancels the active history coalesce window (assigned by zundo's handleSet). */
 let cancelHistoryCoalesce: () => void = () => {};
+
+/**
+ * Drop the oldest undo snapshots once their combined feature payload exceeds the
+ * configured budget, bounding the memory held by history when a large vector
+ * layer is edited repeatedly (issue #341). Called after a snapshot is appended.
+ * Operates on the live temporal store directly; this never touches the main
+ * store, so it does not itself record a history entry.
+ */
+function pruneHistoryBySize(): void {
+  const temporalStore = useAppStore.temporal;
+  const { pastStates } = temporalStore.getState();
+  const trimmed = trimHistoryBySize(pastStates, getMaxHistoryFeatureCount());
+  if (trimmed.length !== pastStates.length) {
+    temporalStore.setState({ pastStates: trimmed });
+  }
+}
 
 export const useAppStore = create<AppState>()(
   temporal(
@@ -855,7 +876,18 @@ export const useAppStore = create<AppState>()(
       handleSet: (baseHandleSet) => {
         const debounced = leadingDebounce(baseHandleSet, getHistoryCoalesceMs);
         cancelHistoryCoalesce = debounced.cancel;
-        return debounced;
+        // Trim history back under the feature-payload budget so editing large
+        // layers can't pin unbounded copies of their feature sets in memory
+        // (issue #341). Only the leading-edge call actually pushes a snapshot;
+        // burst-suppressed calls leave `pastStates` untouched, so skip the scan
+        // unless a new snapshot was appended.
+        return (...args: Parameters<typeof debounced>) => {
+          const before = useAppStore.temporal.getState().pastStates;
+          debounced(...args);
+          if (useAppStore.temporal.getState().pastStates !== before) {
+            pruneHistoryBySize();
+          }
+        };
       },
     }
   )
