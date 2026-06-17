@@ -78,6 +78,10 @@ import {
   setLayerRefreshConfig,
 } from "../../lib/layer-refresh";
 import {
+  canExportRasterLayer,
+  exportRasterLayer,
+} from "../../lib/raster-export";
+import {
   exportVectorLayer,
   geojsonVectorSourceId,
   resolveLayerGeojson,
@@ -546,6 +550,40 @@ export function LayerPanel({
       }
     },
     [clearRefreshStatusTimer, mapControllerRef, scheduleStatusClear],
+  );
+
+  const handleExportRasterLayer = useCallback(
+    async (layer: GeoLibreLayer) => {
+      clearRefreshStatusTimer(layer.id);
+      try {
+        const savedPath = await exportRasterLayer(
+          layer,
+          sanitizeExportFileName(layer.name),
+        );
+        // A null path means the user cancelled the save dialog, so no note.
+        if (savedPath !== null) {
+          setRefreshStatuses((current) => ({
+            ...current,
+            [layer.id]: {
+              type: "success",
+              message: t("layers.exportRasterSuccess"),
+            },
+          }));
+          scheduleStatusClear(layer.id);
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : t("layers.exportRasterError");
+        setRefreshStatuses((current) => ({
+          ...current,
+          [layer.id]: { type: "error", message },
+        }));
+        scheduleStatusClear(layer.id);
+      }
+    },
+    [clearRefreshStatusTimer, scheduleStatusClear, t],
   );
 
   // Read through a ref inside interval callbacks so long-lived timers never
@@ -1067,6 +1105,9 @@ export function LayerPanel({
             // Export writes the layer's GeoJSON features to disk; only
             // geojson-backed vector layers carry those features.
             const canExportLayer = layer.type === "geojson";
+            // Raster/COG layers backed by a downloadable file (a retained
+            // local-bytes blob URL or a source URL) export to GeoTIFF.
+            const canExportRaster = canExportRasterLayer(layer);
             const canRefresh = isRefreshableLayer(layer);
             const refreshConfig = getLayerRefreshConfig(layer);
             const refreshStatus = refreshStatuses[layer.id];
@@ -1479,6 +1520,24 @@ export function LayerPanel({
                               }}
                             >
                               CSV (attributes only)
+                            </DropdownMenuItem>
+                          </DropdownMenuSubContent>
+                        </DropdownMenuSub>
+                      )}
+                      {canExportRaster && (
+                        <DropdownMenuSub>
+                          <DropdownMenuSubTrigger>
+                            <Download className="h-3.5 w-3.5" />
+                            Export
+                          </DropdownMenuSubTrigger>
+                          <DropdownMenuSubContent>
+                            <DropdownMenuItem
+                              onSelect={(e: Event) => {
+                                e.preventDefault();
+                                void handleExportRasterLayer(layer);
+                              }}
+                            >
+                              {t("layers.exportGeoTiff")}
                             </DropdownMenuItem>
                           </DropdownMenuSubContent>
                         </DropdownMenuSub>

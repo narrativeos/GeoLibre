@@ -1271,7 +1271,17 @@ export function DesktopShell({
         onOpenChange={setDiagnosticsOpen}
       />
       <Suspense fallback={null}>
-        <ProcessingDialog mapControllerRef={mapControllerRef} />
+        <ProcessingDialog
+          mapControllerRef={mapControllerRef}
+          onAddRaster={async (bytes, name) => {
+            // Cast required: TS types Uint8Array as Uint8Array<ArrayBufferLike>,
+            // which is not directly assignable to BlobPart under this lib.
+            const file = new File([bytes as BlobPart], `${name}.tif`, {
+              type: "image/tiff",
+            });
+            await addRasterToMap(createAppAPI(mapControllerRef), file, { name });
+          }}
+        />
       </Suspense>
       <Suspense fallback={null}>
         <ConversionDialog />
