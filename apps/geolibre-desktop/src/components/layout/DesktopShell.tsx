@@ -1190,7 +1190,8 @@ export function DesktopShell({
           </SectionErrorBoundary>
         ) : null}
         <main
-          className={`relative min-w-0 flex-1 overflow-hidden ${
+          // `isolate` creates a stacking context so map-panel z-indexes (up to 10000) stay below body-portaled dialogs. See #451.
+          className={`relative isolate min-w-0 flex-1 overflow-hidden ${
             layoutOptions.compact ? "min-h-0" : "min-h-72 md:min-h-0"
           }`}
         >
