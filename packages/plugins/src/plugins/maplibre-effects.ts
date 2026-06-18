@@ -64,6 +64,20 @@ const EFFECTS_OVERLAY_STYLE_ID = "geolibre-effects-maplibre-overlays";
 const MAP_CANVAS_Z_INDEX = "4";
 const CONTROL_CONTAINER_Z_INDEX = "5";
 const MAPLIBRE_OVERLAY_Z_INDEX = "6";
+// All DOM markers (e.g. Geoman's draw/edit vertex handles, plus any custom
+// `new Marker()` the app adds) live in the canvas container and normally paint
+// above the map canvas. Raising the map canvas to MAP_CANVAS_Z_INDEX would
+// otherwise bury them — invisible and unclickable, so a drawn polygon's vertices
+// vanish and you can't click the first one to close it.
+//
+// Intentionally tied to the control container's z-index: that clears the canvas
+// while the control container — a later sibling of the canvas container in
+// MapLibre's DOM — wins the equal-z-index tie and keeps controls on top. Raising
+// CONTROL_CONTAINER_Z_INDEX later moves markers with it, which is the desired
+// coupling. The rule below is a plain class selector (no `!important`), so a
+// marker that needs its own stacking can still set an inline z-index via
+// `Marker#setZIndex()`.
+const MARKER_Z_INDEX = CONTROL_CONTAINER_Z_INDEX;
 
 // Roughly one star per this many CSS pixels of starfield area.
 const STAR_AREA_PER_STAR = 900;
@@ -553,6 +567,9 @@ class EffectsEngine {
     style.textContent = `
       .${EFFECTS_MAP_CLASS} .maplibregl-boxzoom {
         z-index: ${MAPLIBRE_OVERLAY_Z_INDEX};
+      }
+      .${EFFECTS_MAP_CLASS} .maplibregl-marker {
+        z-index: ${MARKER_Z_INDEX};
       }
     `;
     document.head.appendChild(style);
