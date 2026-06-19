@@ -49,6 +49,7 @@ import {
   Plus,
   RotateCcw,
   Settings,
+  SlidersHorizontal,
   Type,
   Trash2,
   TriangleAlert,
@@ -58,18 +59,39 @@ import { useEffect, useMemo, useState, type RefObject } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import {
   DEFAULT_DESKTOP_LAYOUT_SETTINGS,
+  DEFAULT_UI_PROFILE_SETTINGS,
+  EXPERIENCE_LEVELS,
   useDesktopSettingsStore,
   type DesktopSettings,
   type DesktopLayoutSettings,
+  type ExperienceLevel,
+  type UiProfileSettings,
 } from "../../hooks/useDesktopSettings";
 import { useLanguage } from "../../hooks/useLanguage";
+import {
+  DATA_SOURCE_CATALOG,
+  DATA_SOURCE_SECTION_LABEL_KEYS,
+  DATA_SOURCE_SECTION_ORDER,
+  MENU_ITEM_CATALOG,
+  MENU_ITEM_GROUPS,
+  TOP_LEVEL_MENUS,
+  isMenuItemVisible,
+  presetHiddenSets,
+} from "../../lib/ui-profile";
 
 type SettingsSection =
   | "map"
   | "layout"
+  | "interface"
   | "geocoding"
   | "environment"
   | "project";
+
+/** A plugin offered as a visibility toggle in the Interface section. */
+export interface ProfilePlugin {
+  id: string;
+  name: string;
+}
 
 interface SettingsDialogProps {
   buttonClassName?: string;
@@ -78,6 +100,8 @@ interface SettingsDialogProps {
   mapControllerRef: RefObject<MapController | null>;
   showLabels?: boolean;
   onOpenManagePlugins: () => void;
+  /** Toggleable plugins for the Interface (UI profile) section (issue #500). */
+  profilePlugins: ProfilePlugin[];
 }
 
 const SECTION_ITEMS: Array<{
@@ -87,6 +111,11 @@ const SECTION_ITEMS: Array<{
 }> = [
   { id: "map", labelKey: "settings.section.map", icon: MapPinned },
   { id: "layout", labelKey: "settings.section.layout", icon: LayoutPanelTop },
+  {
+    id: "interface",
+    labelKey: "settings.section.interface",
+    icon: SlidersHorizontal,
+  },
   { id: "geocoding", labelKey: "settings.section.geocoding", icon: Locate },
   {
     id: "environment",
@@ -114,6 +143,7 @@ interface DraftPreferences {
 interface DraftDesktopSettings {
   layout: DesktopLayoutSettings;
   shareToken: string;
+  uiProfile: UiProfileSettings;
 }
 
 function createDraftId(): string {
@@ -140,6 +170,13 @@ function cloneDesktopSettings(settings: DesktopSettings): DraftDesktopSettings {
   return {
     layout: { ...settings.layout },
     shareToken: settings.shareToken,
+    uiProfile: {
+      ...settings.uiProfile,
+      hiddenDataSources: [...settings.uiProfile.hiddenDataSources],
+      hiddenPlugins: [...settings.uiProfile.hiddenPlugins],
+      hiddenMenus: [...settings.uiProfile.hiddenMenus],
+      hiddenMenuItems: [...settings.uiProfile.hiddenMenuItems],
+    },
   };
 }
 
@@ -241,6 +278,7 @@ export function SettingsDialog({
   mapControllerRef,
   showLabels = true,
   onOpenManagePlugins,
+  profilePlugins,
 }: SettingsDialogProps) {
   const { t } = useTranslation();
   const {
@@ -254,6 +292,11 @@ export function SettingsDialog({
   const setDesktopSettings = useDesktopSettingsStore(
     (s) => s.setDesktopSettings,
   );
+  // Visibility of the Settings dropdown items under the active UI profile. The
+  // Language/Layout/Interface entries are always shown so the profile UI stays
+  // reachable.
+  const showSettingsItem = (id: string) =>
+    isMenuItemVisible(desktopSettings.uiProfile, id);
   const projectName = useAppStore((s) => s.projectName);
   const projectPath = useAppStore((s) => s.projectPath);
   const setProjectName = useAppStore((s) => s.setProjectName);
@@ -439,11 +482,126 @@ export function SettingsDialog({
     updateDraftLayoutSettings(DEFAULT_DESKTOP_LAYOUT_SETTINGS);
   };
 
+  // Live updates from the Settings dropdown's Interface submenu (not the draft,
+  // which only the dialog commits on Save). Reads the latest state so rapid
+  // toggles do not clobber each other.
+  const updateSavedUiProfile = (patch: Partial<UiProfileSettings>) => {
+    const current = useDesktopSettingsStore.getState().desktopSettings;
+    setDesktopSettings({
+      ...current,
+      uiProfile: { ...current.uiProfile, ...patch },
+    });
+  };
+
+  const applySavedExperiencePreset = (level: ExperienceLevel) => {
+    const sets = presetHiddenSets(
+      level,
+      profilePlugins.map((plugin) => plugin.id),
+    );
+    updateSavedUiProfile({ enabled: true, level, ...sets });
+  };
+
   const updateShareToken = (value: string) => {
     // Kept in the draft and only committed on Save, so editing the token and
     // then closing the dialog without saving discards the change (a secret
     // field should not persist on every keystroke).
     setDraftDesktopSettings((current) => ({ ...current, shareToken: value }));
+  };
+
+  const updateUiProfile = (patch: Partial<UiProfileSettings>) => {
+    setDraftDesktopSettings((current) => ({
+      ...current,
+      uiProfile: { ...current.uiProfile, ...patch },
+    }));
+    setError(null);
+  };
+
+  // Applying an experience-level preset overwrites the hidden lists from tiers
+  // and turns the profile on. Plugin tiers consider the toggleable plugin ids.
+  const applyExperiencePreset = (level: ExperienceLevel) => {
+    const sets = presetHiddenSets(
+      level,
+      profilePlugins.map((plugin) => plugin.id),
+    );
+    updateUiProfile({ enabled: true, level, ...sets });
+  };
+
+  // Toggling a single item makes the selection "custom" (level = null).
+  const toggleDataSourceHidden = (id: string, visible: boolean) => {
+    setDraftDesktopSettings((current) => {
+      const hidden = new Set(current.uiProfile.hiddenDataSources);
+      if (visible) hidden.delete(id);
+      else hidden.add(id);
+      return {
+        ...current,
+        uiProfile: {
+          ...current.uiProfile,
+          level: null,
+          hiddenDataSources: [...hidden],
+        },
+      };
+    });
+    setError(null);
+  };
+
+  const togglePluginHidden = (id: string, visible: boolean) => {
+    setDraftDesktopSettings((current) => {
+      const hidden = new Set(current.uiProfile.hiddenPlugins);
+      if (visible) hidden.delete(id);
+      else hidden.add(id);
+      return {
+        ...current,
+        uiProfile: {
+          ...current.uiProfile,
+          level: null,
+          hiddenPlugins: [...hidden],
+        },
+      };
+    });
+    setError(null);
+  };
+
+  const toggleMenuHidden = (id: string, visible: boolean) => {
+    setDraftDesktopSettings((current) => {
+      const hidden = new Set(current.uiProfile.hiddenMenus);
+      if (visible) hidden.delete(id);
+      else hidden.add(id);
+      return {
+        ...current,
+        uiProfile: { ...current.uiProfile, level: null, hiddenMenus: [...hidden] },
+      };
+    });
+    setError(null);
+  };
+
+  const toggleMenuItemHidden = (id: string, visible: boolean) => {
+    setDraftDesktopSettings((current) => {
+      const hidden = new Set(current.uiProfile.hiddenMenuItems);
+      if (visible) hidden.delete(id);
+      else hidden.add(id);
+      return {
+        ...current,
+        uiProfile: {
+          ...current.uiProfile,
+          level: null,
+          hiddenMenuItems: [...hidden],
+        },
+      };
+    });
+    setError(null);
+  };
+
+  // Reset clears the profile to "show everything" but preserves the admin lock
+  // and the onboarding flag.
+  const resetUiProfile = () => {
+    updateUiProfile({
+      enabled: DEFAULT_UI_PROFILE_SETTINGS.enabled,
+      level: DEFAULT_UI_PROFILE_SETTINGS.level,
+      hiddenDataSources: [],
+      hiddenPlugins: [],
+      hiddenMenus: [],
+      hiddenMenuItems: [],
+    });
   };
 
   const saveSettings = () => {
@@ -464,12 +622,29 @@ export function SettingsDialog({
     const nextProjectName = draftProjectName.trim() || "Untitled Project";
     if (nextProjectName !== projectName) setProjectName(nextProjectName);
     setPreferences(normalized);
+    // When a level preset is still active, recompute its hidden lists from the
+    // current plugin registry at save time. The draft was snapshotted when the
+    // dialog opened, so this picks up any external plugins that loaded since
+    // (and keeps the result identical to applying the preset). A custom profile
+    // (level === null) carries the user's explicit toggles through unchanged.
+    const draftProfile = draftDesktopSettings.uiProfile;
+    const committedUiProfile =
+      draftProfile.level !== null
+        ? {
+            ...draftProfile,
+            ...presetHiddenSets(
+              draftProfile.level,
+              profilePlugins.map((plugin) => plugin.id),
+            ),
+          }
+        : draftProfile;
     // Plugin sources are managed live in the Manage Plugins dialog; preserve the
     // current store values and only update the layout from this dialog.
     setDesktopSettings({
       ...useDesktopSettingsStore.getState().desktopSettings,
       layout: draftDesktopSettings.layout,
       shareToken: draftDesktopSettings.shareToken,
+      uiProfile: committedUiProfile,
     });
     setOpen(false);
   };
@@ -537,18 +712,20 @@ export function SettingsDialog({
             </DropdownMenuSubContent>
           </DropdownMenuSub>
           <DropdownMenuSeparator />
-          <DropdownMenuItem
-            onSelect={() => {
-              setSection("map");
-              setOpen(true);
-            }}
-          >
-            <MapPinned className="mr-2 h-3.5 w-3.5" />
-            {t("settings.menu.mapPreferences")}
-          </DropdownMenuItem>
+          {showSettingsItem("settings.mapPreferences") && (
+            <DropdownMenuItem
+              onSelect={() => {
+                setSection("map");
+                setOpen(true);
+              }}
+            >
+              <MapPinned className="mr-2 h-3.5 w-3.5" />
+              {t("settings.menu.mapPreferences")}
+            </DropdownMenuItem>
+          )}
           <DropdownMenuSub>
             <DropdownMenuSubTrigger>
-              <LayoutPanelTop className="mr-2 h-3.5 w-3.5" />
+              <LayoutPanelTop className="h-3.5 w-3.5" />
               {t("settings.section.layout")}
             </DropdownMenuSubTrigger>
             <DropdownMenuSubContent className="geolibre-layout-submenu w-40 sm:w-72">
@@ -610,37 +787,101 @@ export function SettingsDialog({
               </DropdownMenuLabel>
             </DropdownMenuSubContent>
           </DropdownMenuSub>
-          <DropdownMenuItem
-            onSelect={() => {
-              setSection("geocoding");
-              setOpen(true);
-            }}
-          >
-            <Locate className="mr-2 h-3.5 w-3.5" />
-            {t("settings.menu.geocoding")}
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            onSelect={() => {
-              setSection("environment");
-              setOpen(true);
-            }}
-          >
-            <Braces className="mr-2 h-3.5 w-3.5" />
-            {t("settings.menu.environmentVariables")}
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            onSelect={() => {
-              setSection("project");
-              setOpen(true);
-            }}
-          >
-            <FolderCog className="mr-2 h-3.5 w-3.5" />
-            {t("settings.menu.projectSettings")}
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => onOpenManagePlugins()}>
-            <Puzzle className="mr-2 h-3.5 w-3.5" />
-            {t("settings.menu.managePlugins")}
-          </DropdownMenuItem>
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              <SlidersHorizontal className="h-3.5 w-3.5" />
+              {t("settings.section.interface")}
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="w-56">
+              <DropdownMenuCheckboxItem
+                checked={desktopSettings.uiProfile.enabled}
+                disabled={desktopSettings.uiProfile.locked}
+                onCheckedChange={(checked: boolean) =>
+                  updateSavedUiProfile({ enabled: checked === true })
+                }
+                onSelect={(event: Event) => event.preventDefault()}
+              >
+                {t("settings.interface.enable")}
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel className="px-2 py-1 text-xs font-normal text-muted-foreground">
+                {t("settings.interface.presets")}
+              </DropdownMenuLabel>
+              <DropdownMenuRadioGroup
+                value={desktopSettings.uiProfile.level ?? ""}
+                onValueChange={(value: string) => {
+                  // Guard the cast: the group's value is `level ?? ""`, and no
+                  // radio item carries an empty value, but make the invariant
+                  // explicit so a stray value can't reach presetHiddenSets.
+                  if ((EXPERIENCE_LEVELS as readonly string[]).includes(value)) {
+                    applySavedExperiencePreset(value as ExperienceLevel);
+                  }
+                }}
+              >
+                {EXPERIENCE_LEVELS.map((level) => (
+                  <DropdownMenuRadioItem
+                    key={level}
+                    value={level}
+                    disabled={
+                      desktopSettings.uiProfile.locked ||
+                      !desktopSettings.uiProfile.enabled
+                    }
+                    onSelect={(event: Event) => event.preventDefault()}
+                  >
+                    {t(`settings.interface.level.${level}`)}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onSelect={() => {
+                  setSection("interface");
+                  setOpen(true);
+                }}
+              >
+                {t("settings.menu.interfaceSettings")}
+              </DropdownMenuItem>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+          {showSettingsItem("settings.geocoding") && (
+            <DropdownMenuItem
+              onSelect={() => {
+                setSection("geocoding");
+                setOpen(true);
+              }}
+            >
+              <Locate className="mr-2 h-3.5 w-3.5" />
+              {t("settings.menu.geocoding")}
+            </DropdownMenuItem>
+          )}
+          {showSettingsItem("settings.environment") && (
+            <DropdownMenuItem
+              onSelect={() => {
+                setSection("environment");
+                setOpen(true);
+              }}
+            >
+              <Braces className="mr-2 h-3.5 w-3.5" />
+              {t("settings.menu.environmentVariables")}
+            </DropdownMenuItem>
+          )}
+          {showSettingsItem("settings.projectSettings") && (
+            <DropdownMenuItem
+              onSelect={() => {
+                setSection("project");
+                setOpen(true);
+              }}
+            >
+              <FolderCog className="mr-2 h-3.5 w-3.5" />
+              {t("settings.menu.projectSettings")}
+            </DropdownMenuItem>
+          )}
+          {showSettingsItem("settings.managePlugins") && (
+            <DropdownMenuItem onSelect={() => onOpenManagePlugins()}>
+              <Puzzle className="mr-2 h-3.5 w-3.5" />
+              {t("settings.menu.managePlugins")}
+            </DropdownMenuItem>
+          )}
         </DropdownMenuContent>
       </DropdownMenu>
       <Dialog open={open} onOpenChange={setOpen}>
@@ -897,6 +1138,219 @@ export function SettingsDialog({
                   <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
                     {t("settings.layout.urlParamsNote")}
                   </div>
+                </div>
+              ) : null}
+              {section === "interface" ? (
+                <div className="space-y-5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold">
+                        {t("settings.interface.title")}
+                      </h3>
+                      <p className="text-xs text-muted-foreground">
+                        {t("settings.interface.description")}
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={draftDesktopSettings.uiProfile.locked}
+                      onClick={resetUiProfile}
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" />
+                      {t("common.reset")}
+                    </Button>
+                  </div>
+                  {draftDesktopSettings.uiProfile.locked ? (
+                    <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+                      {t("settings.interface.lockedNote")}
+                    </div>
+                  ) : null}
+                  <label className="flex items-center gap-3 rounded-md border p-3 text-sm">
+                    <input
+                      className="h-4 w-4"
+                      type="checkbox"
+                      checked={draftDesktopSettings.uiProfile.enabled}
+                      disabled={draftDesktopSettings.uiProfile.locked}
+                      onChange={(event) =>
+                        updateUiProfile({ enabled: event.target.checked })
+                      }
+                    />
+                    <SlidersHorizontal className="h-4 w-4 text-muted-foreground" />
+                    <span>{t("settings.interface.enable")}</span>
+                  </label>
+                  <div className="space-y-2">
+                    <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      {t("settings.interface.presets")}
+                    </h4>
+                    <div className="flex flex-wrap gap-2">
+                      {EXPERIENCE_LEVELS.map((level) => (
+                        <Button
+                          key={level}
+                          type="button"
+                          size="sm"
+                          variant={
+                            draftDesktopSettings.uiProfile.level === level
+                              ? "secondary"
+                              : "outline"
+                          }
+                          disabled={
+                            draftDesktopSettings.uiProfile.locked ||
+                            !draftDesktopSettings.uiProfile.enabled
+                          }
+                          onClick={() => applyExperiencePreset(level)}
+                        >
+                          {t(`settings.interface.level.${level}`)}
+                        </Button>
+                      ))}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {t("settings.interface.presetsHint")}
+                    </p>
+                  </div>
+                  <div className="space-y-3">
+                    <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      {t("settings.interface.dataSources")}
+                    </h4>
+                    {DATA_SOURCE_SECTION_ORDER.map((sectionId) => (
+                      <div key={sectionId} className="space-y-1.5">
+                        <h5 className="text-xs font-medium text-muted-foreground">
+                          {t(DATA_SOURCE_SECTION_LABEL_KEYS[sectionId])}
+                        </h5>
+                        <div className="grid gap-1.5 sm:grid-cols-2">
+                          {DATA_SOURCE_CATALOG.filter(
+                            (entry) => entry.section === sectionId,
+                          ).map((entry) => (
+                            <label
+                              key={entry.id}
+                              className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm"
+                            >
+                              <input
+                                className="h-4 w-4"
+                                type="checkbox"
+                                checked={
+                                  !draftDesktopSettings.uiProfile.hiddenDataSources.includes(
+                                    entry.id,
+                                  )
+                                }
+                                disabled={
+                                  draftDesktopSettings.uiProfile.locked ||
+                                  !draftDesktopSettings.uiProfile.enabled
+                                }
+                                onChange={(event) =>
+                                  toggleDataSourceHidden(
+                                    entry.id,
+                                    event.target.checked,
+                                  )
+                                }
+                              />
+                              <span>{t(entry.labelKey)}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {profilePlugins.length > 0 ? (
+                    <div className="space-y-1.5">
+                      <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        {t("settings.interface.plugins")}
+                      </h4>
+                      <div className="grid gap-1.5 sm:grid-cols-2">
+                        {profilePlugins.map((plugin) => (
+                          <label
+                            key={plugin.id}
+                            className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm"
+                          >
+                            <input
+                              className="h-4 w-4"
+                              type="checkbox"
+                              checked={
+                                !draftDesktopSettings.uiProfile.hiddenPlugins.includes(
+                                  plugin.id,
+                                )
+                              }
+                              disabled={
+                                draftDesktopSettings.uiProfile.locked ||
+                                !draftDesktopSettings.uiProfile.enabled
+                              }
+                              onChange={(event) =>
+                                togglePluginHidden(plugin.id, event.target.checked)
+                              }
+                            />
+                            <span>{plugin.name}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  <div className="space-y-3">
+                    <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      {t("settings.interface.menus")}
+                    </h4>
+                    <div className="grid gap-1.5 sm:grid-cols-2">
+                      {TOP_LEVEL_MENUS.map((menu) => (
+                        <label
+                          key={menu.id}
+                          className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm"
+                        >
+                          <input
+                            className="h-4 w-4"
+                            type="checkbox"
+                            checked={
+                              !draftDesktopSettings.uiProfile.hiddenMenus.includes(
+                                menu.id,
+                              )
+                            }
+                            disabled={
+                              draftDesktopSettings.uiProfile.locked ||
+                              !draftDesktopSettings.uiProfile.enabled
+                            }
+                            onChange={(event) =>
+                              toggleMenuHidden(menu.id, event.target.checked)
+                            }
+                          />
+                          <span>{t(menu.labelKey)}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                  {MENU_ITEM_GROUPS.map((group) => (
+                    <div key={group.menuId} className="space-y-1.5">
+                      <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        {t(group.labelKey)}
+                      </h4>
+                      <div className="grid gap-1.5 sm:grid-cols-2">
+                        {MENU_ITEM_CATALOG.filter(
+                          (entry) => entry.menuId === group.menuId,
+                        ).map((entry) => (
+                          <label
+                            key={entry.id}
+                            className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm"
+                          >
+                            <input
+                              className="h-4 w-4"
+                              type="checkbox"
+                              checked={
+                                !draftDesktopSettings.uiProfile.hiddenMenuItems.includes(
+                                  entry.id,
+                                )
+                              }
+                              disabled={
+                                draftDesktopSettings.uiProfile.locked ||
+                                !draftDesktopSettings.uiProfile.enabled
+                              }
+                              onChange={(event) =>
+                                toggleMenuItemHidden(entry.id, event.target.checked)
+                              }
+                            />
+                            <span>{t(entry.labelKey)}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               ) : null}
               {section === "geocoding" ? (

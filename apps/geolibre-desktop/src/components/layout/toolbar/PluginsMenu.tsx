@@ -43,6 +43,8 @@ interface PluginsMenuProps {
   toggle: PluginRegistry["toggle"];
   getMapControlPosition: PluginRegistry["getMapControlPosition"];
   setMapControlPosition: PluginRegistry["setMapControlPosition"];
+  /** Plugin ids hidden by the active UI profile (issue #500). */
+  hiddenPluginIds: Set<string>;
 }
 
 /** The Plugins menu: one toggle per registered plugin, with position submenus. */
@@ -54,6 +56,7 @@ export function PluginsMenu({
   toggle,
   getMapControlPosition,
   setMapControlPosition,
+  hiddenPluginIds,
 }: PluginsMenuProps) {
   const { t } = useTranslation();
 
@@ -107,8 +110,8 @@ export function PluginsMenu({
     );
   };
 
-  const webServicePlugins = plugins.filter((p) =>
-    WEB_SERVICE_PLUGIN_ID_SET.has(p.id),
+  const webServicePlugins = plugins.filter(
+    (p) => WEB_SERVICE_PLUGIN_ID_SET.has(p.id) && !hiddenPluginIds.has(p.id),
   );
   // The web service plugins render as one grouped submenu, placed where the
   // first of them appears in registration order (just above Esri Wayback).
@@ -144,9 +147,17 @@ export function PluginsMenu({
           ) {
             return null;
           }
+          // Hidden by the active UI profile (issue #500).
+          if (hiddenPluginIds.has(p.id)) {
+            return null;
+          }
           if (!WEB_SERVICE_PLUGIN_ID_SET.has(p.id)) {
             return renderPluginMenuItem(p);
           }
+          // Reaching here means `p` is a visible web service plugin, so the
+          // submenu has at least one entry. When all web service plugins are
+          // hidden no plugin reaches this branch and the submenu simply never
+          // renders.
           if (webServicesRendered) return null;
           webServicesRendered = true;
           return (
