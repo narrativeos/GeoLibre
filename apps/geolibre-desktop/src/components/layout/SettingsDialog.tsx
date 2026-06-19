@@ -82,13 +82,24 @@ import {
   showsAdvancedNotices,
 } from "../../lib/ui-profile";
 
-type SettingsSection =
+export type SettingsSection =
   | "map"
   | "layout"
   | "interface"
   | "geocoding"
   | "environment"
   | "project";
+
+/** Window event letting any panel open Settings at a given section (no prop-drilling). */
+export const OPEN_SETTINGS_EVENT = "geolibre:open-settings";
+
+/** Open the Settings dialog at `section` from anywhere in the app. */
+export function openSettingsSection(section: SettingsSection): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { section } }),
+  );
+}
 
 /** A plugin offered as a visibility toggle in the Interface section. */
 export interface ProfilePlugin {
@@ -367,6 +378,31 @@ export function SettingsDialog({
     setError(null);
     setLiveProjection(mapControllerRef.current?.readProjection() ?? null);
   }, [open, mapControllerRef]);
+
+  // Let other panels deep-link into a specific Settings section (e.g. the AI
+  // Assistant onboarding card opens Environment Variables to add a provider key).
+  useEffect(() => {
+    const onOpenSettings = (event: Event) => {
+      const detail = (event as CustomEvent<{ section?: SettingsSection }>)
+        .detail;
+      // setSection before setOpen so the section is already in state when React
+      // renders the open dialog (effectiveSection derives from it at render
+      // time). Only honor the request when the active UI profile actually shows
+      // that section; otherwise effectiveSection would silently fall back to
+      // another tab. The profile is read fresh (not via the effect's closure) so
+      // a profile change after mount is respected.
+      const requested = detail?.section;
+      if (requested) {
+        const gate = SECTION_GATE[requested];
+        const profile =
+          useDesktopSettingsStore.getState().desktopSettings.uiProfile;
+        if (!gate || isMenuItemVisible(profile, gate)) setSection(requested);
+      }
+      setOpen(true);
+    };
+    window.addEventListener(OPEN_SETTINGS_EVENT, onOpenSettings);
+    return () => window.removeEventListener(OPEN_SETTINGS_EVENT, onOpenSettings);
+  }, []);
 
   const toggleValueVisibility = (id: string) => {
     setRevealedValueIds((current) => {
