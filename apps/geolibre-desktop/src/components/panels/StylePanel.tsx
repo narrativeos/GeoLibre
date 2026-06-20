@@ -1,16 +1,20 @@
 import {
   DEFAULT_LAYER_STYLE,
+  type FillPattern,
   type LabelStyle,
   type LayerType,
+  type MarkerShape,
   type PointRenderer,
   type StrokeWidthUnit,
   VECTOR_COLOR_RAMPS,
+  type VectorRule,
   type VectorStyleMode,
   type VectorStyleStop,
   createEqualIntervalBreaks,
   createQuantileBreaks,
   getVectorColorRamp,
   interpolateRampColors,
+  parseJsonExpression,
   styleValue,
   useAppStore,
 } from "@geolibre/core";
@@ -26,6 +30,7 @@ import {
 } from "@geolibre/ui";
 import { RASTER_SOURCE_KIND, SKETCHES_SOURCE_KIND } from "@geolibre/plugins";
 import type { MapController } from "@geolibre/map";
+import type { ParseKeys } from "i18next";
 import { useTranslation } from "react-i18next";
 import { RasterSymbologySection } from "./RasterSymbologySection";
 import {
@@ -158,6 +163,96 @@ function isPointOnlyGeoJsonLayer(layer: {
     const type = feature.geometry?.type;
     return type === "Point" || type === "MultiPoint";
   });
+}
+
+interface GeometryFlags {
+  hasPoint: boolean;
+  hasLine: boolean;
+  hasPolygon: boolean;
+}
+
+// Sample the layer's geometry so the proportional-size, fill-pattern, and marker
+// sections only appear where they apply. When the layer has no in-memory GeoJSON
+// (tile/external layers whose geometry is unknown here) every flag is true so the
+// controls stay available rather than being hidden incorrectly.
+function getGeometryFlags(layer: {
+  geojson?: { features?: Array<{ geometry?: { type?: string } | null }> };
+}): GeometryFlags {
+  const features = layer.geojson?.features;
+  if (!features || features.length === 0) {
+    return { hasPoint: true, hasLine: true, hasPolygon: true };
+  }
+  const flags: GeometryFlags = {
+    hasPoint: false,
+    hasLine: false,
+    hasPolygon: false,
+  };
+  const limit = Math.min(features.length, 2000);
+  for (let index = 0; index < limit; index += 1) {
+    const type = features[index]?.geometry?.type;
+    if (type === "Point" || type === "MultiPoint") flags.hasPoint = true;
+    else if (type === "LineString" || type === "MultiLineString")
+      flags.hasLine = true;
+    else if (type === "Polygon" || type === "MultiPolygon")
+      flags.hasPolygon = true;
+    if (flags.hasPoint && flags.hasLine && flags.hasPolygon) break;
+  }
+  return flags;
+}
+
+const MARKER_SHAPE_OPTIONS: ReadonlyArray<{
+  value: MarkerShape;
+  labelKey: ParseKeys;
+}> = [
+  { value: "circle", labelKey: "style.symbology.markerShapes.circle" },
+  { value: "square", labelKey: "style.symbology.markerShapes.square" },
+  { value: "triangle", labelKey: "style.symbology.markerShapes.triangle" },
+  { value: "diamond", labelKey: "style.symbology.markerShapes.diamond" },
+  { value: "star", labelKey: "style.symbology.markerShapes.star" },
+  { value: "cross", labelKey: "style.symbology.markerShapes.cross" },
+  { value: "pin", labelKey: "style.symbology.markerShapes.pin" },
+  { value: "custom", labelKey: "style.symbology.markerShapes.custom" },
+];
+
+// Glyphs for the marker gallery preview only; they render in the chosen marker
+// color (currentColor). The map renders the precise canvas-drawn shapes.
+const MARKER_GLYPHS: Record<MarkerShape, string> = {
+  circle: "●",
+  square: "■",
+  triangle: "▲",
+  diamond: "◆",
+  star: "★",
+  cross: "✚",
+  pin: "⦿",
+  custom: "⬢",
+};
+
+const FILL_PATTERN_OPTIONS: ReadonlyArray<{
+  value: FillPattern;
+  labelKey: ParseKeys;
+}> = [
+  { value: "none", labelKey: "style.symbology.fillPatterns.none" },
+  { value: "hatch", labelKey: "style.symbology.fillPatterns.hatch" },
+  { value: "cross-hatch", labelKey: "style.symbology.fillPatterns.crossHatch" },
+  { value: "horizontal", labelKey: "style.symbology.fillPatterns.horizontal" },
+  { value: "vertical", labelKey: "style.symbology.fillPatterns.vertical" },
+  { value: "dots", labelKey: "style.symbology.fillPatterns.dots" },
+  { value: "svg", labelKey: "style.symbology.fillPatterns.svg" },
+];
+
+/** Create a blank rule-based filter rule with a unique id. */
+function createVectorRule(isElse: boolean, color: string): VectorRule {
+  const id =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `rule-${Math.random().toString(36).slice(2)}`;
+  return {
+    id,
+    label: isElse ? "Else" : "",
+    filter: "",
+    color,
+    isElse,
+  };
 }
 
 function getMetadataFieldNames(metadata: Record<string, unknown>): string[] {
@@ -577,6 +672,12 @@ function validateExpressionJson(value: string, label: string): string | null {
     if (!Array.isArray(parsed)) {
       return `${label} must be a JSON array expression.`;
     }
+    // Every MapLibre expression starts with a string operator. Reject e.g.
+    // `["to-number", …]` used as a filter or a bare value array, which parses as
+    // JSON but compiles to an expression MapLibre rejects at runtime.
+    if (typeof parsed[0] !== "string") {
+      return `${label} must start with an operator, e.g. ["==", ["get", "field"], value].`;
+    }
     return null;
   } catch (error) {
     return `${label} is not valid JSON: ${
@@ -988,6 +1089,16 @@ export function StylePanel({
   // Must run before the early returns below so the hook order stays stable.
   const isPointOnly = useMemo(
     () => (layer ? isPointOnlyGeoJsonLayer(layer) : false),
+    [layer],
+  );
+  // Memoized so the per-feature geometry scan (up to 2000 features) does not
+  // re-run on every render, e.g. while typing in a rule filter textarea. Kept
+  // before the early returns below so the hook order stays stable.
+  const geometryFlags = useMemo(
+    () =>
+      layer
+        ? getGeometryFlags(layer)
+        : { hasPoint: true, hasLine: true, hasPolygon: true },
     [layer],
   );
 
@@ -1466,6 +1577,87 @@ export function StylePanel({
   );
   const colorRampPreview =
     getVectorColorRamp(draftVectorStyleColorRamp).colors;
+
+  // --- Rule-based renderer (immediate writes to style.vectorRules) ---
+  const currentRules = styleValue(style, "vectorRules");
+  const concreteRules = currentRules.filter((rule) => !rule.isElse);
+  const elseRule = currentRules.find((rule) => rule.isElse) ?? null;
+  const setVectorRules = (rules: VectorRule[]) =>
+    setLayerStyle(layer.id, { vectorRules: rules });
+  const updateVectorRule = (id: string, patch: Partial<VectorRule>) =>
+    setVectorRules(
+      currentRules.map((rule) =>
+        rule.id === id ? { ...rule, ...patch } : rule,
+      ),
+    );
+  const addVectorRule = () => {
+    const next = createVectorRule(false, nextStopColor(concreteRules.length));
+    // Keep the catch-all else rule last so it reads as the fallback.
+    setVectorRules(
+      elseRule ? [...concreteRules, next, elseRule] : [...concreteRules, next],
+    );
+  };
+  const removeVectorRule = (id: string) =>
+    setVectorRules(currentRules.filter((rule) => rule.id !== id));
+  const setElseRuleColor = (color: string) => {
+    if (elseRule) {
+      updateVectorRule(elseRule.id, { color });
+      return;
+    }
+    setVectorRules([...currentRules, createVectorRule(true, color)]);
+  };
+
+  // --- Geometry-gated sections (proportional size, fill pattern, markers) ---
+  // geometryFlags is memoized above the early returns.
+  const showProportionalControls =
+    hasVectorPaintControls &&
+    pointRenderer !== "heatmap" &&
+    // A marker symbol layer uses a baked icon (icon-size 1), so proportional
+    // circle-radius sizing would not apply; hide it for points to avoid a silent
+    // no-op. The marker gate stays inside the point branch so that proportional
+    // line-width controls remain available on layers that carry lines (markers
+    // never affect line rendering, even if markerEnabled is set on a mixed
+    // point+line layer via a hand-edited project file).
+    ((geometryFlags.hasPoint &&
+      pointRenderer === "single" &&
+      !styleValue(style, "markerEnabled")) ||
+      geometryFlags.hasLine);
+  const showFillPatternControls =
+    hasVectorPaintControls && !extrusionEnabled && geometryFlags.hasPolygon;
+  const showMarkerControls =
+    hasVectorPaintControls &&
+    supportsPointRenderer &&
+    pointRenderer === "single";
+
+  const proportionalEnabled = styleValue(style, "proportionalSizeEnabled");
+  const proportionalProperty = styleValue(style, "proportionalSizeProperty");
+  const proportionalMinValue = styleValue(style, "proportionalSizeMinValue");
+  const proportionalMaxValue = styleValue(style, "proportionalSizeMaxValue");
+  const proportionalMinRadius = styleValue(style, "proportionalSizeMinRadius");
+  const proportionalMaxRadius = styleValue(style, "proportionalSizeMaxRadius");
+  // A small graduated-size legend: evenly spaced sample values mapped onto the
+  // interpolated radius range, mirroring what the map renders.
+  const proportionalLegend =
+    proportionalEnabled &&
+    proportionalMaxValue > proportionalMinValue &&
+    proportionalMinRadius <= proportionalMaxRadius
+      ? Array.from({ length: 5 }, (_, index) => {
+          const ratio = index / 4;
+          return {
+            value:
+              proportionalMinValue +
+              ratio * (proportionalMaxValue - proportionalMinValue),
+            radius:
+              proportionalMinRadius +
+              ratio * (proportionalMaxRadius - proportionalMinRadius),
+          };
+        })
+      : [];
+
+  const fillPattern = styleValue(style, "fillPattern");
+  const markerEnabled = styleValue(style, "markerEnabled");
+  const markerShape = styleValue(style, "markerShape");
+
   const vectorSymbologyControls = (
     <div className="space-y-3">
       <div className="space-y-2">
@@ -1477,10 +1669,17 @@ export function StylePanel({
             updateDraftVectorStyleMode(event.target.value as VectorStyleMode)
           }
         >
-          <option value="single">Single symbology</option>
-          <option value="graduated">Graduated</option>
-          <option value="categorized">Categorized</option>
-          <option value="expression">Advanced expression</option>
+          <option value="single">{t("style.symbology.modeSingle")}</option>
+          <option value="graduated">{t("style.symbology.modeGraduated")}</option>
+          <option value="categorized">
+            {t("style.symbology.modeCategorized")}
+          </option>
+          <option value="rule-based">
+            {t("style.symbology.modeRuleBased")}
+          </option>
+          <option value="expression">
+            {t("style.symbology.modeExpression")}
+          </option>
         </Select>
       </div>
       {usesAttributeSymbology && (
@@ -1647,6 +1846,104 @@ export function StylePanel({
           />
         </div>
       )}
+      {draftVectorStyleMode === "rule-based" && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <Label>{t("style.symbology.rules")}</Label>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              className="h-7 w-7"
+              title={t("style.symbology.addRule")}
+              aria-label={t("style.symbology.addRule")}
+              onClick={addVectorRule}
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+          {concreteRules.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              {t("style.symbology.noRulesPrefix")}
+              <code>{'["==", ["get", "TYPE"], "park"]'}</code>
+              {t("style.symbology.noRulesSuffix")}
+            </p>
+          ) : null}
+          {concreteRules.map((rule, index) => (
+            <div
+              key={rule.id}
+              className="space-y-2 rounded-md border border-input p-2"
+            >
+              <div className="grid grid-cols-[auto_1fr_2rem] items-center gap-2">
+                <ColorField
+                  fill={false}
+                  aria-label={t("style.symbology.ruleColor", {
+                    index: index + 1,
+                  })}
+                  eyedropperLabel={t("style.symbology.ruleColorPick", {
+                    index: index + 1,
+                  })}
+                  className="h-9 w-9 p-1"
+                  buttonClassName="h-9 w-9"
+                  value={rule.color}
+                  onChange={(color) => updateVectorRule(rule.id, { color })}
+                />
+                <Input
+                  aria-label={t("style.symbology.ruleLabel", {
+                    index: index + 1,
+                  })}
+                  placeholder={t("style.symbology.labelPlaceholder")}
+                  value={rule.label}
+                  onChange={(event) =>
+                    updateVectorRule(rule.id, { label: event.target.value })
+                  }
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  title={t("style.symbology.removeRule")}
+                  aria-label={t("style.symbology.removeRule")}
+                  onClick={() => removeVectorRule(rule.id)}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+              <textarea
+                aria-label={t("style.symbology.ruleFilter", {
+                  index: index + 1,
+                })}
+                className="min-h-16 w-full rounded-md border border-input bg-background px-2 py-1.5 font-mono text-xs placeholder:text-muted-foreground focus-visible:border-2 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-0"
+                placeholder='["==", ["get", "TYPE"], "park"]'
+                value={rule.filter}
+                onChange={(event) =>
+                  updateVectorRule(rule.id, { filter: event.target.value })
+                }
+              />
+              {rule.filter.trim() && !parseJsonExpression(rule.filter) ? (
+                <p className="text-xs text-destructive">
+                  {t("style.symbology.filterInvalid")}
+                </p>
+              ) : null}
+            </div>
+          ))}
+          <div className="grid grid-cols-[auto_1fr] items-center gap-2 rounded-md border border-dashed border-input p-2">
+            <ColorField
+              fill={false}
+              aria-label={t("style.symbology.elseRuleColor")}
+              eyedropperLabel={t("style.symbology.elseRuleColorPick")}
+              className="h-9 w-9 p-1"
+              buttonClassName="h-9 w-9"
+              value={elseRule?.color ?? style.fillColor}
+              onChange={setElseRuleColor}
+            />
+            <span className="text-xs text-muted-foreground">
+              {t("style.symbology.elseAllOtherFeatures")}
+            </span>
+          </div>
+        </div>
+      )}
       <Button
         type="button"
         size="sm"
@@ -1656,8 +1953,294 @@ export function StylePanel({
       >
         Apply style type
       </Button>
+      {draftVectorStyleMode === "rule-based" &&
+        draftVectorStyleMode !== styleValue(style, "vectorStyleMode") && (
+          <p className="text-xs text-muted-foreground">
+            {t("style.symbology.applyHint")}
+          </p>
+        )}
       {vectorStyleError && (
         <p className="text-xs text-destructive">{vectorStyleError}</p>
+      )}
+    </div>
+  );
+  const proportionalSizeControls = (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <Label htmlFor="proportionalSizeEnabled">
+          {t("style.symbology.proportionalSize")}
+        </Label>
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <input
+            id="proportionalSizeEnabled"
+            type="checkbox"
+            checked={proportionalEnabled}
+            onChange={(event) =>
+              setLayerStyle(layer.id, {
+                proportionalSizeEnabled: event.target.checked,
+              })
+            }
+          />
+          {t("style.symbology.sizeByValue")}
+        </label>
+      </div>
+      {proportionalEnabled && (
+        <>
+          <div className="space-y-2">
+            <Label htmlFor="proportionalSizeProperty">
+              {t("style.symbology.sizeField")}
+            </Label>
+            <Select
+              id="proportionalSizeProperty"
+              value={proportionalProperty}
+              onChange={(event) =>
+                setLayerStyle(layer.id, {
+                  proportionalSizeProperty: event.target.value,
+                })
+              }
+              disabled={vectorStylePropertyOptions.length === 0}
+            >
+              {vectorStylePropertyOptions.length === 0 ? (
+                <option value="">{t("style.labels.noAttributes")}</option>
+              ) : (
+                <>
+                  <option value="">{t("style.symbology.chooseField")}</option>
+                  {vectorStylePropertyOptions.map((property) => (
+                    <option key={property} value={property}>
+                      {property}
+                    </option>
+                  ))}
+                </>
+              )}
+            </Select>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <NumericStyleInput
+              id="proportionalSizeMinValue"
+              label={t("style.symbology.minValue")}
+              min={-1_000_000_000}
+              max={1_000_000_000}
+              step={1}
+              value={proportionalMinValue}
+              onChange={(proportionalSizeMinValue) =>
+                setLayerStyle(layer.id, { proportionalSizeMinValue })
+              }
+            />
+            <NumericStyleInput
+              id="proportionalSizeMaxValue"
+              label={t("style.symbology.maxValue")}
+              min={-1_000_000_000}
+              max={1_000_000_000}
+              step={1}
+              value={proportionalMaxValue}
+              onChange={(proportionalSizeMaxValue) =>
+                setLayerStyle(layer.id, { proportionalSizeMaxValue })
+              }
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <NumericStyleInput
+              id="proportionalSizeMinRadius"
+              label={t("style.symbology.minSize")}
+              min={0}
+              max={100}
+              step={1}
+              value={proportionalMinRadius}
+              onChange={(proportionalSizeMinRadius) =>
+                setLayerStyle(layer.id, { proportionalSizeMinRadius })
+              }
+            />
+            <NumericStyleInput
+              id="proportionalSizeMaxRadius"
+              label={t("style.symbology.maxSize")}
+              min={0}
+              max={100}
+              step={1}
+              value={proportionalMaxRadius}
+              onChange={(proportionalSizeMaxRadius) =>
+                setLayerStyle(layer.id, { proportionalSizeMaxRadius })
+              }
+            />
+          </div>
+          {proportionalLegend.length > 0 && proportionalProperty ? (
+            <div className="space-y-1">
+              <Label>{t("style.symbology.sizeLegend")}</Label>
+              <div className="flex items-end justify-between gap-2 rounded-md border border-input p-3">
+                {proportionalLegend.map((entry, index) => (
+                  <div
+                    key={index}
+                    className="flex flex-col items-center gap-1"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="rounded-full bg-primary/70"
+                      style={{
+                        width: entry.radius * 2,
+                        height: entry.radius * 2,
+                      }}
+                    />
+                    <span className="text-[10px] text-muted-foreground">
+                      {entry.value.toLocaleString(undefined, {
+                        maximumFractionDigits: 1,
+                      })}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </>
+      )}
+    </div>
+  );
+  const fillPatternControls = (
+    <div className="space-y-3">
+      <div className="space-y-2">
+        <Label htmlFor="fillPattern">{t("style.symbology.fillPattern")}</Label>
+        <Select
+          id="fillPattern"
+          value={fillPattern}
+          onChange={(event) =>
+            setLayerStyle(layer.id, {
+              fillPattern: event.target.value as FillPattern,
+            })
+          }
+        >
+          {FILL_PATTERN_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {t(option.labelKey)}
+            </option>
+          ))}
+        </Select>
+      </div>
+      {fillPattern !== "none" && fillPattern !== "svg" ? (
+        <div className="space-y-2">
+          <Label htmlFor="fillPatternColor">
+            {t("style.symbology.patternColor")}
+          </Label>
+          <ColorField
+            id="fillPatternColor"
+            value={styleValue(style, "fillPatternColor")}
+            onChange={(fillPatternColor) =>
+              setLayerStyle(layer.id, { fillPatternColor })
+            }
+          />
+        </div>
+      ) : null}
+      {fillPattern === "svg" ? (
+        <div className="space-y-2">
+          <Label htmlFor="fillPatternSvg">
+            {t("style.symbology.patternSvg")}
+          </Label>
+          <textarea
+            id="fillPatternSvg"
+            className="min-h-20 w-full rounded-md border border-input bg-background px-2 py-1.5 font-mono text-xs placeholder:text-muted-foreground focus-visible:border-2 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-0"
+            placeholder={t("style.symbology.svgPlaceholder")}
+            value={styleValue(style, "fillPatternSvg")}
+            onChange={(event) =>
+              setLayerStyle(layer.id, { fillPatternSvg: event.target.value })
+            }
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+  const markerControls = (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <Label htmlFor="markerEnabled">{t("style.symbology.marker")}</Label>
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <input
+            id="markerEnabled"
+            type="checkbox"
+            checked={markerEnabled}
+            onChange={(event) =>
+              setLayerStyle(layer.id, { markerEnabled: event.target.checked })
+            }
+          />
+          {t("style.symbology.useMarkerIcon")}
+        </label>
+      </div>
+      {markerEnabled && (
+        <>
+          <div className="space-y-2">
+            <Label>{t("style.symbology.markerShape")}</Label>
+            <div className="grid grid-cols-4 gap-2">
+              {MARKER_SHAPE_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  title={t(option.labelKey)}
+                  aria-label={t(option.labelKey)}
+                  aria-pressed={markerShape === option.value}
+                  onClick={() =>
+                    setLayerStyle(layer.id, { markerShape: option.value })
+                  }
+                  className={`flex h-12 flex-col items-center justify-center gap-0.5 rounded-md border text-[9px] ${
+                    markerShape === option.value
+                      ? "border-primary ring-1 ring-primary"
+                      : "border-input hover:border-primary/50"
+                  }`}
+                >
+                  <span
+                    aria-hidden="true"
+                    className="text-base leading-none"
+                    style={{
+                      color:
+                        option.value === "custom"
+                          ? undefined
+                          : styleValue(style, "markerColor"),
+                    }}
+                  >
+                    {MARKER_GLYPHS[option.value]}
+                  </span>
+                  <span className="truncate">{t(option.labelKey)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          {markerShape !== "custom" ? (
+            <div className="space-y-2">
+              <Label htmlFor="markerColor">
+                {t("style.symbology.markerColor")}
+              </Label>
+              <ColorField
+                id="markerColor"
+                value={styleValue(style, "markerColor")}
+                onChange={(markerColor) =>
+                  setLayerStyle(layer.id, { markerColor })
+                }
+              />
+            </div>
+          ) : null}
+          <NumericStyleInput
+            id="markerSize"
+            label={t("style.symbology.markerSize")}
+            min={6}
+            max={96}
+            step={1}
+            value={styleValue(style, "markerSize")}
+            onChange={(markerSize) =>
+              setLayerStyle(layer.id, { markerSize })
+            }
+          />
+          {markerShape === "custom" ? (
+            <div className="space-y-2">
+              <Label htmlFor="markerSvg">
+                {t("style.symbology.markerSvg")}
+              </Label>
+              <textarea
+                id="markerSvg"
+                className="min-h-20 w-full rounded-md border border-input bg-background px-2 py-1.5 font-mono text-xs placeholder:text-muted-foreground focus-visible:border-2 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-0"
+                placeholder={t("style.symbology.svgPlaceholder")}
+                value={styleValue(style, "markerSvg")}
+                onChange={(event) =>
+                  setLayerStyle(layer.id, { markerSvg: event.target.value })
+                }
+              />
+            </div>
+          ) : null}
+        </>
       )}
     </div>
   );
@@ -2328,6 +2911,28 @@ export function StylePanel({
             twoDimensionalControls
           ) : (
             extrusionControls
+          )}
+          {(!hasExtrusionControls || !extrusionEnabled) && (
+            <>
+              {showProportionalControls && (
+                <>
+                  <Separator />
+                  {proportionalSizeControls}
+                </>
+              )}
+              {showFillPatternControls && (
+                <>
+                  <Separator />
+                  {fillPatternControls}
+                </>
+              )}
+              {showMarkerControls && (
+                <>
+                  <Separator />
+                  {markerControls}
+                </>
+              )}
+            </>
           )}
           {/* Attribute labels apply to vector features, not the heatmap density
               surface or the 3D extrusion render. */}
