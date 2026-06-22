@@ -14,6 +14,7 @@ import type { MapController } from "@geolibre/map";
 import type { ParseKeys } from "i18next";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { type LatLon, parseLatLon } from "../../lib/coordinates";
 import {
   type DmsAxis,
   decimalToDmsAxis,
@@ -79,6 +80,12 @@ export function SetViewDialog({
   const [dms, setDms] = useState<DmsFields>(EMPTY_DMS);
   const [format, setFormat] = useState<CoordFormat>("dd");
   const [error, setError] = useState<string | null>(null);
+  // The smart-paste box: a full coordinate string in DD/DMS/DDM that, when it
+  // parses, fills the precise fields below so users need not split it by hand.
+  // The parse result is held alongside it so the failed-hint check and the fill
+  // share one parse rather than re-running it on every render.
+  const [paste, setPaste] = useState("");
+  const [parsedCoord, setParsedCoord] = useState<LatLon | null>(null);
 
   // Seed both coordinate representations from the live camera whenever the
   // dialog opens, so switching DD<->DMS shows the same point either way.
@@ -102,6 +109,8 @@ export function SetViewDialog({
     // format too rather than carrying over the last session's DD/DMS choice.
     setFormat("dd");
     setError(null);
+    setPaste("");
+    setParsedCoord(null);
   }, [open, mapControllerRef]);
 
   const update = (key: keyof ViewFields) => (value: string) =>
@@ -139,6 +148,30 @@ export function SetViewDialog({
     setError(null);
     setFormat(next);
   };
+
+  // Parse a pasted/typed coordinate string and, when it decodes, fill both the
+  // DD fields and the DMS parts so the change shows in whichever format is
+  // active. Unrecognized text is left in the box and flagged inline below.
+  const handlePaste = (value: string) => {
+    setPaste(value);
+    const parsed = parseLatLon(value);
+    setParsedCoord(parsed);
+    if (!parsed) return;
+    setFields((current) => ({
+      ...current,
+      longitude: round(parsed.lon, 6),
+      latitude: round(parsed.lat, 6),
+    }));
+    setDms({
+      lon: decimalToDmsAxis(parsed.lon, "lon"),
+      lat: decimalToDmsAxis(parsed.lat, "lat"),
+    });
+    setError(null);
+  };
+
+  // True only when there is text that failed to parse, so the hint can switch
+  // from neutral guidance to an error without flagging an empty box.
+  const pasteFailed = paste.trim() !== "" && parsedCoord === null;
 
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
@@ -296,6 +329,31 @@ export function SetViewDialog({
             <SectionHeading>
               {t("toolbar.setView.sectionCoordinates")}
             </SectionHeading>
+            {/* Smart paste: drop a full coordinate string in any common notation
+                and the precise fields below fill in, so there is no need to
+                strip symbols or split the value by hand (#719). */}
+            <div className="space-y-1.5">
+              <Label htmlFor="set-view-paste">
+                {t("toolbar.setView.smartPaste")}
+              </Label>
+              <Input
+                id="set-view-paste"
+                value={paste}
+                placeholder={t("toolbar.setView.smartPastePlaceholder")}
+                aria-invalid={pasteFailed || undefined}
+                onChange={(event) => handlePaste(event.target.value)}
+              />
+              <p
+                className={cn(
+                  "text-xs",
+                  pasteFailed ? "text-destructive" : "text-muted-foreground",
+                )}
+              >
+                {pasteFailed
+                  ? t("toolbar.setView.smartPasteInvalid")
+                  : t("toolbar.setView.smartPasteHint")}
+              </p>
+            </div>
             {/* Native radios (not buttons) so the browser gives the group its
                 roving tabindex and arrow-key navigation for free; each input is
                 absolutely positioned over its label so it stays clickable while
