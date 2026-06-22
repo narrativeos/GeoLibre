@@ -23,6 +23,21 @@ import {
   maplibreTimeSliderPlugin,
   maplibreUsgsLidarPlugin,
   PluginManager,
+  registerRightPanel,
+  unregisterRightPanel,
+  openRightPanel,
+  collapseRightPanel,
+  closeRightPanel,
+  getActiveRightPanel,
+  setActiveRightPanelDock,
+  getActiveRightPanelDock,
+  registerToolbarMenu,
+  unregisterToolbarMenu,
+  registerFloatingPanel,
+  unregisterFloatingPanel,
+  openFloatingPanel,
+  closeFloatingPanel,
+  getOpenFloatingPanels,
 } from "@geolibre/plugins";
 import type { MapController } from "@geolibre/map";
 import type {
@@ -587,6 +602,21 @@ export function createAppAPI(
           }),
         ));
     })(),
+    registerRightPanel,
+    unregisterRightPanel,
+    openRightPanel,
+    collapseRightPanel,
+    closeRightPanel,
+    getActiveRightPanel,
+    setActiveRightPanelDock,
+    getActiveRightPanelDock,
+    registerToolbarMenu,
+    unregisterToolbarMenu,
+    registerFloatingPanel,
+    unregisterFloatingPanel,
+    openFloatingPanel,
+    closeFloatingPanel,
+    getOpenFloatingPanels,
   };
 }
 

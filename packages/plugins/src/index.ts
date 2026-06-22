@@ -1,5 +1,45 @@
 export * from "./types";
 export { PluginManager } from "./plugin-manager";
+export {
+  registerRightPanel,
+  unregisterRightPanel,
+  openRightPanel,
+  collapseRightPanel,
+  closeRightPanel,
+  getActiveRightPanel,
+  setActiveRightPanelDock,
+  moveActiveRightPanelDock,
+  getActiveRightPanelDock,
+  RIGHT_PANEL_DOCKS,
+  isRightPanelCollapsed,
+  getRightPanel,
+  listRightPanels,
+  getRightPanelSnapshot,
+  subscribeRightPanels,
+  type RightPanelSnapshot,
+  type RightPanelDock,
+} from "./right-panel-registry";
+export {
+  registerToolbarMenu,
+  unregisterToolbarMenu,
+  listToolbarMenus,
+  getToolbarMenusSnapshot,
+  subscribeToolbarMenus,
+  type ToolbarMenusSnapshot,
+} from "./toolbar-menu-registry";
+export {
+  registerFloatingPanel,
+  unregisterFloatingPanel,
+  openFloatingPanel,
+  closeFloatingPanel,
+  focusFloatingPanel,
+  isFloatingPanelOpen,
+  getOpenFloatingPanels,
+  getFloatingPanel,
+  getFloatingPanelsSnapshot,
+  subscribeFloatingPanels,
+  type FloatingPanelsSnapshot,
+} from "./floating-panel-registry";
 export { maplibreLayerControlPlugin } from "./plugins/layer-control";
 export { osmBasemapPlugin } from "./plugins/osm-basemap";
 export { cartoLightPlugin } from "./plugins/carto-light";

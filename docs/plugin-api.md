@@ -84,6 +84,68 @@ export interface GeoLibreAppAPI {
     position: GeoLibreMapControlPosition,
   ) => boolean;
   getDeckGL?: () => Promise<GeoLibreDeckGL>;
+  // Right-sidebar panels (see "Right sidebar panels" below).
+  registerRightPanel?: (panel: GeoLibreRightPanelRegistration) => () => void;
+  unregisterRightPanel?: (id: string) => void;
+  openRightPanel?: (id: string) => boolean;
+  collapseRightPanel?: (id: string) => void;
+  closeRightPanel?: (id: string) => void;
+  getActiveRightPanel?: () => string | null;
+  setActiveRightPanelDock?: (dock: GeoLibreRightPanelDock) => void;
+  getActiveRightPanelDock?: () => GeoLibreRightPanelDock | null;
+  // Top toolbar menus (see "Toolbar menus" below).
+  registerToolbarMenu?: (menu: GeoLibreToolbarMenu) => () => void;
+  unregisterToolbarMenu?: (id: string) => void;
+  // Floating panels (see "Floating panels" below).
+  registerFloatingPanel?: (panel: GeoLibreFloatingPanelRegistration) => () => void;
+  unregisterFloatingPanel?: (id: string) => void;
+  openFloatingPanel?: (id: string) => boolean;
+  closeFloatingPanel?: (id: string) => void;
+  getOpenFloatingPanels?: () => string[];
+}
+
+export interface GeoLibreToolbarMenu {
+  id: string;
+  label: string;
+  icon?: string; // URL or data: URI
+  items: GeoLibreToolbarMenuItem[];
+}
+
+export type GeoLibreToolbarMenuItem =
+  | { type?: "action"; id: string; label: string; icon?: string; disabled?: boolean; onSelect: () => void }
+  | { type: "submenu"; id: string; label: string; icon?: string; items: GeoLibreToolbarMenuItem[] }
+  | { type: "separator"; id?: string };
+
+export interface GeoLibreFloatingPanelRegistration {
+  id: string;
+  title: string;
+  icon?: string; // URL or data: URI
+  defaultWidth?: number;
+  render: (container: HTMLElement) => void | (() => void);
+  onOpen?: () => void;
+  onClose?: () => void;
+}
+
+export type GeoLibreRightPanelDock =
+  | "left-of-layers" // left of the Layers panel
+  | "right-of-layers" // between the Layers panel and the map
+  | "left-of-style" // between the map and the Style panel
+  | "right-of-style"; // right of the Style panel (default)
+
+export interface GeoLibreRightPanelRegistration {
+  id: string;
+  title: string;
+  /** Initial dock position; "right-of-style" (default). */
+  dock?: GeoLibreRightPanelDock;
+  /** Optional rail icon: a URL or data: URI rendered as an image. */
+  icon?: string;
+  /** Preferred expanded width in px (desktop only; host-clamped). */
+  defaultWidth?: number;
+  /** Fill the panel body with your own DOM. May return a cleanup function. */
+  render: (container: HTMLElement) => void | (() => void);
+  onOpen?: () => void;
+  onCollapse?: () => void;
+  onClose?: () => void;
 }
 ```
 
@@ -182,6 +244,100 @@ https://viewer.geolibre.app/?url=https://example.com/project.geolibre.json&examp
 ```
 
 A URL parameter activates only an already-registered (installed) plugin that owns it; it never loads a plugin from the URL. For external plugins, include the plugin manifest URL in the project `plugins` state (so the plugin is registered) before relying on its URL handler — the matching parameter then activates and dispatches it even if it is not in the active set.
+
+## Right sidebar panels
+
+A plugin can register a native right-sidebar panel that docks beside the built-in Style panel and behaves like a first-class part of the workspace, instead of emulating one with a fixed overlay. The host renders the panel chrome (a header with collapse and close buttons, a collapsible rail, and a resize handle); the plugin owns only the body.
+
+```typescript
+export const myPlugin: GeoLibrePlugin = {
+  id: "my-workbench",
+  name: "Workbench",
+  version: "0.1.0",
+  activate(app) {
+    // Register once, then open. registerRightPanel returns an unregister fn.
+    this._unregister = app.registerRightPanel?.({
+      id: "my-workbench",
+      title: "Workbench",
+      defaultWidth: 360,
+      render(container) {
+        const button = document.createElement("button");
+        button.textContent = "Run analysis";
+        container.appendChild(button);
+        // Optional cleanup, run when the panel closes or is unregistered.
+        return () => button.remove();
+      },
+      onOpen() {},
+      onCollapse() {},
+      onClose() {},
+    });
+    app.openRightPanel?.("my-workbench");
+  },
+  deactivate(app) {
+    app.closeRightPanel?.("my-workbench");
+    this._unregister?.();
+  },
+} as GeoLibrePlugin & { _unregister?: () => void };
+```
+
+Notes:
+
+- `render(container)` is called once with an empty element you fill with plain DOM. An external plugin cannot share GeoLibre's React instance, so the contract is DOM, not a React node. The container stays mounted across collapse, so any state in your DOM persists; the returned cleanup runs on close or unregister.
+- Only one plugin panel is active at a time. The built-in panel on the side the plugin panel is docked (Layers on the left, Style on the right) collapses to its rail while the plugin panel is expanded next to it, and restores when the plugin panel moves to the other side, collapses to its own rail, or closes.
+- `openRightPanel(id)` makes the panel active and expanded (it also expands a collapsed panel); `collapseRightPanel(id)` collapses it to its rail without closing; `closeRightPanel(id)` releases the workspace; `getActiveRightPanel()` returns the active id or `null`.
+- The panel is a flex sibling of the map, so opening it shrinks the map view (the map keeps filling the remaining space); no manual map padding is required.
+- **Dock position:** a panel docks at one of four positions (left to right): `left-of-layers`, `right-of-layers` (between Layers and the map), `left-of-style` (between the map and Style), or `right-of-style` (the default). Set `dock` on the registration to choose the initial position. The user steps the panel between positions at runtime with the two move buttons in the panel header (disabled at the ends), and a plugin can set it directly with `app.setActiveRightPanelDock?.(...)`. The position resets to the panel's declared `dock` when it closes or another panel opens.
+- These methods are typed optional for forward-compatibility with host variants that have no right sidebar, so call them with optional chaining (`app.registerRightPanel?.(...)`).
+
+## Toolbar menus
+
+A plugin can add its own top-level menu button to the GeoLibre banner (beside Project / Edit / View / Plugins), with nested submenus and action items. Register the menu in `activate` and unregister it in `deactivate`:
+
+```typescript
+const unregister = app.registerToolbarMenu?.({
+  id: "my-plugin-menu",
+  label: "Workbench",
+  items: [
+    { id: "open", label: "Open workbench", onSelect: () => app.openRightPanel?.("my-workbench") },
+    {
+      type: "submenu",
+      id: "tools",
+      label: "Tools",
+      items: [
+        { id: "qa", label: "Data QA", onSelect: () => app.openFloatingPanel?.("my-qa") },
+      ],
+    },
+    { type: "separator" },
+    { id: "about", label: "About", disabled: false, onSelect: () => {} },
+  ],
+});
+```
+
+Each item is an **action** (`onSelect`, the default when `type` is omitted), a **submenu** (nested `items`), or a **separator**. Items typically open a right panel or a floating panel, but `onSelect` can run anything. Re-registering the same `id` replaces the menu, so you can rebuild it as your plugin's state changes.
+
+## Floating panels
+
+A floating panel is a draggable, closeable card the host overlays on the map's top-left corner. Unlike a dockable right panel (one active panel docked at a fixed position), several floating panels can be open at once and they do not shrink the map. The render contract is the same plain-DOM `render(container)` as right panels.
+
+```typescript
+const unregister = app.registerFloatingPanel?.({
+  id: "my-qa",
+  title: "Data QA",
+  defaultWidth: 300,
+  render(container) {
+    container.textContent = "Rendered by the plugin via registerFloatingPanel().";
+    return () => {
+      // optional cleanup, run on close/unregister
+    };
+  },
+});
+
+app.openFloatingPanel?.("my-qa");   // open (or bring to front)
+app.closeFloatingPanel?.("my-qa");  // close
+app.getOpenFloatingPanels?.();      // -> string[] of open ids, stacking order
+```
+
+Use a right panel for a primary, persistent workspace and a floating panel for an ancillary tool or dashboard the user positions over the map. As with the other surfaces, call these methods with optional chaining since they are typed optional.
 
 ## External plugins
 

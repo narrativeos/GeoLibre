@@ -205,6 +205,218 @@ export interface GeoLibreAppAPI {
    * deck.gl, so plugins should still call it with optional chaining.
    */
   getDeckGL?: () => Promise<GeoLibreDeckGL>;
+  /**
+   * Register a plugin-owned right-sidebar panel that docks beside the built-in
+   * Style panel and behaves like a first-class part of the workspace. Returns
+   * an unregister function (call it from `deactivate`). The panel is not shown
+   * until `openRightPanel(panel.id)` runs. While a plugin panel is the active
+   * right-side workspace the host collapses the Style panel to its rail and
+   * restores it when the plugin panel closes. Typed optional for
+   * forward-compatibility with host variants without a right sidebar, so
+   * plugins should call it with optional chaining.
+   */
+  registerRightPanel?: (panel: GeoLibreRightPanelRegistration) => () => void;
+  /** Remove a previously registered right panel (closing it if active). */
+  unregisterRightPanel?: (id: string) => void;
+  /**
+   * Make the panel the active right-side workspace and expand it. Returns false
+   * if no panel with that id is registered. Re-opening a collapsed panel
+   * expands it.
+   */
+  openRightPanel?: (id: string) => boolean;
+  /** Collapse the active right panel to its rail without closing it. */
+  collapseRightPanel?: (id: string) => void;
+  /** Close the active right panel and restore the Style panel. */
+  closeRightPanel?: (id: string) => void;
+  /** Id of the active right-side workspace panel, or null when none is open. */
+  getActiveRightPanel?: () => string | null;
+  /**
+   * Dock the active panel at a specific position, mirroring the user-facing move
+   * buttons so a plugin can reposition its own panel. No-op when no panel is
+   * active. See {@link GeoLibreRightPanelDock}.
+   */
+  setActiveRightPanelDock?: (dock: GeoLibreRightPanelDock) => void;
+  /** Where the active panel docks, or null when none is open. */
+  getActiveRightPanelDock?: () => GeoLibreRightPanelDock | null;
+  /**
+   * Register a plugin-owned top-level toolbar menu shown in the GeoLibre banner
+   * beside the built-in menus, with nested submenus and action items. Returns
+   * an unregister function (call it from `deactivate`). Re-registering the same
+   * id replaces the menu. Typed optional for forward-compatibility with hosts
+   * that have no top toolbar, so call it with optional chaining.
+   */
+  registerToolbarMenu?: (menu: GeoLibreToolbarMenu) => () => void;
+  /** Remove a previously registered toolbar menu. */
+  unregisterToolbarMenu?: (id: string) => void;
+  /**
+   * Register a plugin-owned floating panel: a draggable, closeable card the
+   * host overlays on the map's top-left corner. Returns an unregister function
+   * (call it from `deactivate`). The panel is not shown until
+   * {@link openFloatingPanel} is called. Unlike a right panel, several floating
+   * panels can be open at once and they do not shrink the map.
+   */
+  registerFloatingPanel?: (
+    panel: GeoLibreFloatingPanelRegistration,
+  ) => () => void;
+  /** Remove a registered floating panel (closing it if open). */
+  unregisterFloatingPanel?: (id: string) => void;
+  /** Open a floating panel (or bring an already-open one to the front). */
+  openFloatingPanel?: (id: string) => boolean;
+  /** Close an open floating panel. */
+  closeFloatingPanel?: (id: string) => void;
+  /** Ids of the currently open floating panels, in stacking order. */
+  getOpenFloatingPanels?: () => string[];
+}
+
+/**
+ * An action item in a plugin {@link GeoLibreToolbarMenu}. Selecting it runs
+ * {@link onSelect} (for example, to open a right panel or floating panel).
+ */
+export interface GeoLibreToolbarMenuAction {
+  /** Discriminator; defaults to "action" when omitted. */
+  type?: "action";
+  /** Stable id, unique within the menu. */
+  id: string;
+  /** Label shown in the menu. */
+  label: string;
+  /** Optional icon: a URL or `data:` URI rendered as an image. */
+  icon?: string;
+  /** When true, the item is shown disabled and cannot be selected. */
+  disabled?: boolean;
+  /** Invoked when the user selects the item. */
+  onSelect: () => void;
+}
+
+/** A nested submenu in a plugin {@link GeoLibreToolbarMenu}. */
+export interface GeoLibreToolbarSubmenu {
+  type: "submenu";
+  /** Stable id, unique within the parent menu. */
+  id: string;
+  /** Label shown on the submenu trigger. */
+  label: string;
+  /** Optional icon: a URL or `data:` URI rendered as an image. */
+  icon?: string;
+  /** Child items (actions, separators, or further submenus). */
+  items: GeoLibreToolbarMenuItem[];
+}
+
+/** A divider between groups of items in a plugin toolbar menu. */
+export interface GeoLibreToolbarSeparator {
+  type: "separator";
+  /** Optional id (only needed as a stable React key when you have many). */
+  id?: string;
+}
+
+/** One entry in a plugin toolbar menu: an action, a submenu, or a separator. */
+export type GeoLibreToolbarMenuItem =
+  | GeoLibreToolbarMenuAction
+  | GeoLibreToolbarSubmenu
+  | GeoLibreToolbarSeparator;
+
+/**
+ * A plugin-owned top-level toolbar menu. The host renders it as a dropdown
+ * button in the banner beside the built-in menus.
+ */
+export interface GeoLibreToolbarMenu {
+  /** Stable unique id used to unregister the menu. */
+  id: string;
+  /** Button label shown in the toolbar. */
+  label: string;
+  /** Optional icon: a URL or `data:` URI rendered as an image. */
+  icon?: string;
+  /** Top-level items (actions, separators, or submenus). */
+  items: GeoLibreToolbarMenuItem[];
+}
+
+/**
+ * A plugin-owned floating panel: a draggable, closeable card the host overlays
+ * on the map's top-left corner. The plugin owns only the body via {@link render}
+ * (plain DOM); the host provides the card chrome (a draggable title bar with a
+ * close button). Several floating panels can be open at once, and they do not
+ * shrink the map.
+ */
+export interface GeoLibreFloatingPanelRegistration {
+  /** Stable unique id used to open/close the panel. */
+  id: string;
+  /** Title shown in the card's title bar. */
+  title: string;
+  /** Optional icon: a URL or `data:` URI rendered in the title bar. */
+  icon?: string;
+  /** Preferred card width in px (the host clamps it to a sensible range). */
+  defaultWidth?: number;
+  /**
+   * Populate the card body. Called once with an empty container the plugin
+   * fills with its own DOM. The container stays mounted while the card is open,
+   * so plugin state persists. May return a cleanup function the host runs when
+   * the panel closes or is unregistered.
+   */
+  render: (container: HTMLElement) => void | (() => void);
+  /** Called after the panel opens. */
+  onOpen?: () => void;
+  /** Called after the panel closes. */
+  onClose?: () => void;
+}
+
+/**
+ * Where a plugin panel docks, left to right: `left-of-layers` (the far-left
+ * edge), `right-of-layers` (between the Layers panel and the map), `left-of-style`
+ * (between the map and the Style panel), or `right-of-style` (the far-right
+ * edge). The built-in panel on the docked side (Layers on the left, Style on the
+ * right) collapses to its rail while the plugin panel is expanded next to it.
+ */
+export type GeoLibreRightPanelDock =
+  | "left-of-layers"
+  | "right-of-layers"
+  | "left-of-style"
+  | "right-of-style";
+
+/**
+ * A plugin-owned dockable side panel. The host renders the registered panel in
+ * its own dock (one of three positions beside the Layers/Style panels), with a
+ * collapsible rail, a header (title plus move/collapse/close buttons), and a
+ * resize handle. The plugin owns only the content: `render` is called once with
+ * an empty container element the plugin fills with its own DOM (an external
+ * plugin cannot share GeoLibre's React, so the contract is plain DOM rather
+ * than a React node).
+ */
+export interface GeoLibreRightPanelRegistration {
+  /** Stable unique id used to open/collapse/close the panel. */
+  id: string;
+  /** Human-readable title shown in the panel header and collapsed rail. */
+  title: string;
+  /**
+   * Where the panel docks initially: `left-of-layers`, `right-of-layers`,
+   * `left-of-style`, or `right-of-style` (the default). The built-in panel on
+   * the docked side (Layers on the left, Style on the right) collapses to its
+   * rail while the plugin panel is expanded next to it. The user can move the
+   * panel between positions at runtime with the move buttons in its header (or
+   * a plugin via {@link GeoLibreAppAPI.setActiveRightPanelDock}).
+   */
+  dock?: GeoLibreRightPanelDock;
+  /**
+   * Optional icon for the collapsed rail. A URL or `data:` URI is rendered as
+   * an image; any other value is ignored in favor of a default glyph.
+   */
+  icon?: string;
+  /**
+   * Preferred width of the expanded panel in pixels (desktop only; the host
+   * clamps it to a sensible range). Defaults to the host's standard panel
+   * width.
+   */
+  defaultWidth?: number;
+  /**
+   * Populate the panel body. Called once with an empty container when the panel
+   * first becomes active; the plugin appends its own DOM. The container is kept
+   * mounted across collapse so plugin state persists. May return a cleanup
+   * function invoked when the panel is closed or unregistered.
+   */
+  render: (container: HTMLElement) => void | (() => void);
+  /** Called after the panel opens (becomes the active workspace). */
+  onOpen?: () => void;
+  /** Called after the panel collapses to its rail. */
+  onCollapse?: () => void;
+  /** Called after the panel closes (releases the workspace). */
+  onClose?: () => void;
 }
 
 export interface GeoLibrePlugin {
