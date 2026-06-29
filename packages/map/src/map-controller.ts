@@ -39,6 +39,7 @@ import {
   syncLayer,
   vectorTileStyleLayerIds,
 } from "./layer-sync";
+import { installGlobePopupOcclusion } from "./globe-popup-occlusion";
 import { ResetBearingControl } from "./reset-bearing-control";
 
 const DEFAULT_PROJECTION: maplibregl.ProjectionSpecification = {
@@ -760,6 +761,7 @@ export class MapController {
 
   syncLayers(layers: GeoLibreLayer[]): void {
     if (!this.isStyleReady() || !this.map) return;
+    installGlobePopupOcclusion(maplibregl);
     const map = this.map;
 
     const nextIds = layers.map((l) => l.id);
