@@ -28,9 +28,11 @@ import {
 } from "@geolibre/plugins";
 import type { MapController } from "@geolibre/map";
 import {
+  applyMapboxStyleImport,
   buildMapboxStyle,
   isPlaceholderLayer,
   mapboxStyleToJson,
+  parseMapboxStyle,
   placeholderMessage,
 } from "@geolibre/map";
 import { getIsMobileViewport } from "../../hooks/useIsMobileViewport";
@@ -88,6 +90,7 @@ import {
   TableProperties,
   Timer,
   Trash2,
+  Upload,
   ZoomIn,
 } from "lucide-react";
 import { clamp } from "../../lib/clamp";
@@ -111,7 +114,10 @@ import {
   shapefileFieldWarnings,
   type VectorExportFormat,
 } from "../../lib/vector-export";
-import { saveTextFileWithFallback } from "../../lib/tauri-io";
+import {
+  openLocalDataFileWithFallback,
+  saveTextFileWithFallback,
+} from "../../lib/tauri-io";
 import {
   readPostgisTable,
   writePostgisTable,
@@ -974,6 +980,85 @@ export function LayerPanel({
     [clearRefreshStatusTimer, mapControllerRef, scheduleStatusClear, t],
   );
 
+  // Import a Mapbox GL / MapLibre style JSON and apply its symbology to a vector
+  // layer, so cartography authored elsewhere (or a style exported from GeoLibre)
+  // can be brought back in instead of being rebuilt by hand. Anything the style
+  // could not represent is surfaced as a warning rather than dropped silently.
+  const handleImportStyle = useCallback(
+    async (layer: GeoLibreLayer) => {
+      clearRefreshStatusTimer(layer.id);
+      try {
+        const picked = await openLocalDataFileWithFallback({
+          filters: [{ name: "Mapbox GL style", extensions: ["json"] }],
+          accept: ".json,application/json",
+          readText: true,
+        });
+        // A null result means the user dismissed the file dialog; no note. Guard
+        // on `picked` itself (not `picked.text`) so an empty/whitespace file is
+        // still parsed and surfaces an "invalid JSON" error rather than a
+        // silent no-op that looks like a cancel.
+        if (!picked || picked.text === undefined) return;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(picked.text);
+        } catch {
+          setRefreshStatuses((current) => ({
+            ...current,
+            [layer.id]: {
+              type: "error",
+              message: t("layers.importStyleInvalid"),
+            },
+          }));
+          scheduleStatusClear(layer.id);
+          return;
+        }
+        const result = parseMapboxStyle(parsed);
+        if (result.matchedLayerCount === 0) {
+          setRefreshStatuses((current) => ({
+            ...current,
+            [layer.id]: {
+              type: "error",
+              message:
+                result.warnings[0] ?? t("layers.importStyleNoMatch"),
+            },
+          }));
+          scheduleStatusClear(layer.id);
+          return;
+        }
+        // The file picker await can block while the user edits the Style panel,
+        // so merge onto the current store style (not the pre-await snapshot) to
+        // avoid clobbering a concurrent edit, matching handleRefreshLayer.
+        const latest = useAppStore
+          .getState()
+          .layers.find((candidate) => candidate.id === layer.id);
+        if (!latest) return;
+        updateLayer(layer.id, {
+          style: applyMapboxStyleImport(latest.style, result),
+        });
+        setRefreshStatuses((current) => ({
+          ...current,
+          [layer.id]:
+            result.warnings.length > 0
+              ? {
+                  type: "warning",
+                  message: `${t("layers.importStyleSuccess")} ${result.warnings.join(" ")}`,
+                }
+              : { type: "success", message: t("layers.importStyleSuccess") },
+        }));
+        scheduleStatusClear(layer.id);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : t("layers.importStyleError");
+        setRefreshStatuses((current) => ({
+          ...current,
+          [layer.id]: { type: "error", message },
+        }));
+        scheduleStatusClear(layer.id);
+      }
+    },
+    [clearRefreshStatusTimer, scheduleStatusClear, t, updateLayer],
+  );
+
   // Commit the layer's current (edited) features back to the source they were
   // loaded from, via the sidecar: either overwriting the local file in place,
   // or diffing against the PostGIS table by primary key. Unlike Export, there
@@ -1807,6 +1892,11 @@ export function LayerPanel({
             // Export writes the layer's GeoJSON features to disk; only
             // geojson-backed vector layers carry those features.
             const canExportLayer = layer.type === "geojson";
+            // Importing a Mapbox GL style only writes the layer's vector
+            // symbology, so it applies to any vector-styled layer (local GeoJSON
+            // and vector tiles), not just the export-capable GeoJSON layers.
+            const canImportStyle =
+              layer.type === "geojson" || layer.type === "vector-tiles";
             // Write-back commits edits to the layer's local source file in place
             // (desktop only, supported formats); Export writes a new file.
             const canWriteBack = canWriteEditsToSource(layer);
@@ -2249,6 +2339,16 @@ export function LayerPanel({
                             </DropdownMenuItem>
                           </DropdownMenuSubContent>
                         </DropdownMenuSub>
+                      )}
+                      {canImportStyle && (
+                        <DropdownMenuItem
+                          onSelect={() => {
+                            void handleImportStyle(layer);
+                          }}
+                        >
+                          <Upload className="mr-2 h-3.5 w-3.5" />
+                          {t("layers.importMapboxStyle")}
+                        </DropdownMenuItem>
                       )}
                       {canWriteBack && (
                         <DropdownMenuItem
