@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { classifyFetchFailure } from "./fetch-error";
 import { isTauri } from "./is-tauri";
 
 export type DiagnosticCategory = "console" | "map" | "network" | "runtime";
@@ -238,7 +239,13 @@ function safeStringify(value: unknown): string {
   }
 }
 
-function formatUnknown(value: unknown): string {
+/**
+ * Renders an arbitrary thrown value as a diagnostics detail string: an Error's
+ * stack (or message), a string as-is, anything else JSON-stringified. Exported
+ * so callers that build their own records (e.g. native-http.ts) format errors
+ * the same way.
+ */
+export function formatUnknown(value: unknown): string {
   if (value instanceof Error) return value.stack ?? value.message;
   if (typeof value === "string") return value;
   return safeStringify(value);
@@ -268,6 +275,21 @@ function redactUrl(raw: string): string {
   } catch {
     return raw;
   }
+}
+
+// Matches an http(s) URL embedded in free text, stopping before whitespace or a
+// closing delimiter so a URL inside `(...)` or quotes is captured without its
+// surrounding punctuation.
+const EMBEDDED_URL = /https?:\/\/[^\s)"'<>]+/g;
+
+// A record's `detail` often carries a raw error string, and a native
+// (Rust/reqwest) error embeds the full request URL verbatim — including any
+// `api_key`/`token` query param that `redactUrl` strips from the record's `url`
+// field. The detail is rendered in the panel and included in the "Copy JSON"
+// export, so redact any URLs it contains the same way, keeping secrets out of
+// exported diagnostics.
+function redactUrlsInText(text: string): string {
+  return text.replace(EMBEDDED_URL, (match) => redactUrl(match));
 }
 
 function requestUrl(input: Parameters<typeof fetch>[0]): string {
@@ -308,8 +330,11 @@ export function appendDiagnostic(input: DiagnosticInput): void {
     ...input,
     id: `diagnostic-${Date.now()}-${sequence++}`,
     timestamp: input.timestamp ?? new Date().toISOString(),
-    message: truncate(input.message),
-    detail: input.detail ? truncate(input.detail) : undefined,
+    // Runtime/plugin/console emitters can forward an arbitrary error or console
+    // string (which may embed a tokenized URL) into either field, so redact both
+    // the same way as the `url` field before storing/exporting them.
+    message: truncate(redactUrlsInText(input.message)),
+    detail: input.detail ? truncate(redactUrlsInText(input.detail)) : undefined,
     source: input.source ? truncate(input.source) : undefined,
     url: input.url ? truncate(redactUrl(input.url)) : undefined,
   };
@@ -431,6 +456,13 @@ export function installDiagnosticsCapture(): () => void {
       // It mirrors the unhandled-rejection downgrade below; genuine failures
       // outside the window are still flagged as errors.
       const benignStartup = !isAbort && !optional && isBenignStartupFetch(error);
+      // Classify a genuine failure (network/TLS/CORS vs. timeout) so the panel
+      // record interprets the otherwise-opaque browser error and carries an
+      // actionable hint (issue #1175). Aborts, optional-resource failures, and
+      // the benign startup warm-up keep their existing handling above.
+      const classified = !isAbort && !optional && !benignStartup;
+      const failure = classified ? classifyFetchFailure(error) : null;
+      const rawDetail = isAbort ? undefined : formatUnknown(error);
       appendDiagnostic({
         category: "network",
         level:
@@ -439,8 +471,13 @@ export function installDiagnosticsCapture(): () => void {
           ? `${method} aborted`
           : benignStartup
             ? `${method} request failed (benign Tauri custom-protocol warm-up)`
-            : `${method} request failed`,
-        detail: isAbort ? undefined : formatUnknown(error),
+            : failure && failure.kind !== "unknown"
+              ? `${method} request failed (${failure.label})`
+              : `${method} request failed`,
+        detail:
+          failure?.hint && rawDetail
+            ? `${failure.hint}\n\n${rawDetail}`
+            : rawDetail,
         durationMs: Math.round(performance.now() - startedAt),
         method,
         url,

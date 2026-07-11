@@ -5,6 +5,8 @@
 
 import { DEFAULT_LAYER_STYLE, type GeoLibreLayer } from "@geolibre/core";
 import type { FeatureCollection } from "geojson";
+import type { TFunction } from "i18next";
+import { classifyFetchFailure } from "../../../lib/fetch-error";
 import { isTauri } from "../../../lib/is-tauri";
 import {
   DELIMITED_TEXT_DELIMITERS,
@@ -203,6 +205,25 @@ export function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+/**
+ * Builds a translated, user-facing message for a failed service request in the
+ * Add Data forms. A network/TLS/CORS or timeout failure (the ones the browser
+ * or native path report opaquely) maps to a localized hint; anything else keeps
+ * the error's own message so a service exception or status text still shows
+ * through. This routes the fetch-error classification through `t()` so the form
+ * does not surface an untranslated string next to its localized labels.
+ */
+export function serviceRequestErrorMessage(
+  error: unknown,
+  t: TFunction,
+  fallback: string,
+): string {
+  const { kind } = classifyFetchFailure(error);
+  if (kind === "network") return t("addData.common.networkFailure");
+  if (kind === "timeout") return t("addData.common.requestTimedOut");
+  return errorMessage(error, fallback);
+}
+
 function isViteDevServer(): boolean {
   return Boolean(
     (
@@ -251,14 +272,18 @@ async function fetchCapabilitiesText(
     // but race it against the caller's abort + a 30s cap so this call still
     // returns promptly (matching the browser fetch branch below) rather than
     // hanging on a slow host or a superseded request.
-    const { invoke } = await import("@tauri-apps/api/core");
+    const { fetchUrlBytes } = await import("../../../lib/native-http");
     const timeout = AbortSignal.timeout(30_000);
     const abort = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    const bytesPromise = fetchUrlBytes(requestUrl, {
+      context: "OGC GetCapabilities",
+    });
+    // If the abort/timeout wins the race, the native call is left unobserved;
+    // swallow its later rejection so it does not surface as an unhandled
+    // rejection (it is still recorded in diagnostics by the native-http wrapper).
+    bytesPromise.catch(() => {});
     try {
-      const bytes = await Promise.race([
-        invoke<number[] | Uint8Array>("fetch_url_bytes", { url: requestUrl }),
-        rejectOnAbort(abort),
-      ]);
+      const bytes = await Promise.race([bytesPromise, rejectOnAbort(abort)]);
       const array = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
       return { ok: true, status: 200, text: decodeXmlBytes(array) };
     } catch (error) {

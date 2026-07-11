@@ -6,9 +6,9 @@ import { DEFAULT_WMS_ENDPOINT, DEFAULT_WMS_LAYERS } from "../constants";
 import {
   createBaseLayer,
   createWmsTileUrl,
-  errorMessage,
   fetchWmsCapabilities,
   normalizeWmsVersion,
+  serviceRequestErrorMessage,
   stripOgcOperationParams,
   wmsVersionFromEndpoint,
   type WmsLayerOption,
@@ -158,7 +158,9 @@ export function WmsSource() {
     } catch (error) {
       if (isStale()) return;
       setLayerOptions([]);
-      setRetrieveError(errorMessage(error, t("addData.wms.retrieveError")));
+      setRetrieveError(
+        serviceRequestErrorMessage(error, t, t("addData.wms.retrieveError")),
+      );
     } finally {
       if (token === retrieveTokenRef.current) setIsRetrieving(false);
     }
