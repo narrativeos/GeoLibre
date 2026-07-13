@@ -6,6 +6,7 @@ import {
   augmentFolders,
   buildBrowserTree,
   buildDirectoryNodes,
+  buildFavoriteNodes,
   buildPostgisTableNodes,
   filterBrowserTree,
   MAX_DIRECTORY_ENTRIES,
@@ -223,6 +224,48 @@ describe("buildPostgisTableNodes", () => {
 
   it("returns an empty array for no tables", () => {
     assert.deepEqual(buildPostgisTableNodes(CONN, []), []);
+  });
+});
+
+describe("buildFavoriteNodes", () => {
+  it("rebuilds each favorite kind into its node", () => {
+    const nodes = buildFavoriteNodes([
+      { id: "service:s1", kind: "service", label: "Basemap", serviceId: "s1", serviceKind: "xyz", builtin: true },
+      { id: "folder:/d", kind: "folder", label: "d", path: "/d" },
+      { id: "file:/d/a.geojson", kind: "file", label: "a.geojson", path: "/d/a.geojson" },
+    ]);
+    assert.deepEqual(
+      nodes.map((n) => `${n.kind}:${n.addable}`),
+      ["service:true", "folder:false", "file:true"],
+    );
+    // A favorited folder is an expandable group with empty children; the id
+    // matches the original so the panel's per-path state is shared.
+    assert.deepEqual(nodes[1].children, []);
+    assert.equal(nodes[0].serviceId, "s1");
+    assert.equal(nodes[0].builtin, true); // built-in badge preserved
+    assert.equal(nodes[2].path, "/d/a.geojson");
+  });
+});
+
+describe("buildBrowserTree — Favorites section", () => {
+  it("omits the Favorites section when there are no favorites", () => {
+    const tree = buildBrowserTree({ services: [], recentProjects: [] });
+    assert.equal(find(tree, "section:favorites"), undefined);
+    assert.equal(tree[0].id, "section:services");
+  });
+
+  it("leads with a Favorites section when favorites exist", () => {
+    const tree = buildBrowserTree({
+      services: [],
+      recentProjects: [],
+      favorites: [
+        { id: "service:s1", kind: "service", label: "Basemap", serviceId: "s1" },
+      ],
+    });
+    // Favorites is the first section.
+    assert.equal(tree[0].id, "section:favorites");
+    assert.equal(tree[0].count, 1);
+    assert.equal(find(tree, "service:s1")?.label, "Basemap");
   });
 });
 
