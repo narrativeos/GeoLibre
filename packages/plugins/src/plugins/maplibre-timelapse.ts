@@ -49,6 +49,7 @@ import {
 } from "./timelapse-engine";
 import {
   getTimelapseProvider,
+  listTimelapseProviders,
   type TimelapseFrame,
   type TimelapseProvider,
 } from "./timelapse-providers";
@@ -87,6 +88,13 @@ function frameLayerId(frame: TimelapseFrame): string {
  * frozen animation. */
 const SOURCE_LOADED_TIMEOUT_MS = 2000;
 
+/** Fallback for the cosmetic tiles-ready gate: enable Play/Record this long
+ * after the stack is built even if the map never fires `idle`. A slow or
+ * partly-404 tile host (e.g. GIBS, which has no imagery over ocean) can keep
+ * the map from ever settling, which would otherwise leave Play stuck disabled
+ * until an unrelated interaction nudges the map idle. */
+const TILES_READY_FALLBACK_MS = 3000;
+
 /** Strict per-frame render gate while recording (`idle` can legitimately take
  * a while on slow networks; bail out so a stuck source can't hang the export). */
 const RECORD_IDLE_TIMEOUT_MS = 8000;
@@ -123,6 +131,10 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
 export interface TimelapseLabels {
   /** Panel title shown in the floating card's title bar. */
   title: string;
+  /** Accessible name of the imagery-provider picker (shown only with >1 provider). */
+  provider: string;
+  /** Heading above a thematic provider's class legend (e.g. land cover). */
+  legend: string;
   yearSlider: string;
   play: string;
   pause: string;
@@ -143,6 +155,8 @@ export interface TimelapseLabels {
 
 export const DEFAULT_TIMELAPSE_LABELS: TimelapseLabels = {
   title: "Timelapse",
+  provider: "Imagery source",
+  legend: "Legend",
   yearSlider: "Timelapse year",
   play: "Play",
   pause: "Pause",
@@ -168,6 +182,22 @@ export function setTimelapseLabels(next: Partial<TimelapseLabels>): void {
   labels = { ...labels, ...next };
   timelapseControl?.refreshLabels();
   syncPanelRegistration();
+}
+
+/**
+ * Theme a native `<select>` so its text/border track the app theme. Inline (not
+ * just the index.css `.geolibre-timelapse-panel` block, which themes the option
+ * popup): rules from other control stylesheets can outrank a class selector.
+ * The `important` color is required — with the app's global `transition: all`
+ * on form controls, Chromium otherwise keeps reporting the pre-theme (black)
+ * text color for a plain inline declaration.
+ */
+function styleThemedSelect(select: HTMLSelectElement): void {
+  select.style.background = "hsl(var(--background))";
+  select.style.setProperty("color", "hsl(var(--foreground))", "important");
+  select.style.border = "1px solid hsl(var(--border))";
+  select.style.borderRadius = "4px";
+  select.style.padding = "2px 4px";
 }
 
 /** Shared styling for the panel's labelled (Play/Record) buttons. */
@@ -250,8 +280,10 @@ interface TimelapseControlOptions {
  * {@link renderInto} never runs.
  */
 export class TimelapseControl {
-  readonly provider: TimelapseProvider;
-  readonly frames: TimelapseFrame[];
+  // Not readonly: switchProvider swaps the active imagery provider (and its
+  // frame stack) in place without tearing down the panel.
+  provider: TimelapseProvider;
+  frames: TimelapseFrame[];
 
   private map: MapLibreMap | null;
   private frameIndex = 0;
@@ -262,13 +294,27 @@ export class TimelapseControl {
   private tilesReady = false;
   private stackPresent = false;
   private playTimer: ReturnType<typeof setTimeout> | null = null;
+  // Fallback timer for the tiles-ready gate (see armTilesReadyGate); cleared
+  // when the map fires `idle` first, when re-arming, and on teardown.
+  private tilesReadyTimer: ReturnType<typeof setTimeout> | null = null;
+  // The current `idle` listener for the tiles-ready gate, tracked so a stale
+  // one from a prior arm can be removed before re-arming.
+  private tilesReadyIdleHandler: (() => void) | null = null;
   // Bumped by play()/pause() so a tick() awaiting the next year's tiles when
   // playback is toggled can tell it is stale and must not advance the frame
   // (a resumed session schedules its own timer; the old tick racing it would
   // double-advance).
   private playSession = 0;
+  // Bumped by switchProvider() so a slow async provider whose listFrames()
+  // resolves after the user has already picked another cannot clobber the newer
+  // selection (mirrors playSession / the plugin-level activationSession).
+  private switchSession = 0;
   private recordAbort: AbortController | null = null;
 
+  // The floating-panel body container, kept so switchProvider can re-render the
+  // slider range/labels/attribution in place after swapping providers.
+  private container: HTMLElement | null = null;
+  private providerSelect: HTMLSelectElement | null = null;
   private slider: HTMLInputElement | null = null;
   private playButton: HTMLButtonElement | null = null;
   private yearLabel: HTMLElement | null = null;
@@ -278,6 +324,7 @@ export class TimelapseControl {
   private recordButton: HTMLButtonElement | null = null;
   private recordStatus: HTMLElement | null = null;
   private attributionLine: HTMLElement | null = null;
+  private legendHeading: HTMLElement | null = null;
   private badge: HTMLElement | null = null;
 
   constructor(options: TimelapseControlOptions) {
@@ -396,6 +443,92 @@ export class TimelapseControl {
   rebuildStack(): void {
     this.stackPresent = false;
     this.ensureStack();
+  }
+
+  /**
+   * Swap the active imagery provider (the panel's provider picker). Pauses
+   * playback, tears down the current frame stack and mirroring store layer,
+   * resolves the new provider's frames (awaiting a remote catalog if the
+   * provider is async), rebuilds the pre-warmed stack from the oldest year, and
+   * re-renders the panel body in place so the slider range, end labels, and
+   * attribution follow the new years.
+   *
+   * A no-op that leaves the current stack untouched (and re-syncs the picker to
+   * the active provider) when: a recording is in flight, the id resolves back
+   * to the current provider, a newer switch superseded this one while its
+   * frames were resolving, the async catalog rejected, or the provider yields
+   * no frames. The {@link switchSession} counter mirrors the `activationSession`
+   * /`playSession` pattern so a slow async provider that resolves after the
+   * user has already picked another cannot clobber the newer selection.
+   */
+  async switchProvider(providerId: string): Promise<void> {
+    // Tearing down the stack mid-recording would corrupt the export (the record
+    // loop is drawing from these exact layers); the select is also disabled
+    // while recording, so this only guards the programmatic path.
+    if (this.recording) return;
+    // Bump the session on every early return too: re-selecting the active
+    // provider must cancel a still-pending switch to another one (otherwise
+    // that older switch's resolution would pass the superseded check below and
+    // apply, overriding this re-selection).
+    if (providerId === this.provider.id) {
+      this.switchSession += 1;
+      return;
+    }
+    const provider = getTimelapseProvider(providerId);
+    // An unknown id falls back to the built-in provider; if that is the one
+    // already active, there is nothing to switch to — but the native <select>
+    // has already moved to the rejected option, so restore its display.
+    if (provider.id === this.provider.id) {
+      this.switchSession += 1;
+      this.syncProviderSelect();
+      return;
+    }
+    const session = ++this.switchSession;
+    let frames: TimelapseFrame[];
+    try {
+      const framesResult = provider.listFrames();
+      frames = Array.isArray(framesResult) ? framesResult : await framesResult;
+    } catch {
+      // A remote catalog can reject; keep the current provider and re-sync the
+      // picker so it doesn't advertise a source that never loaded.
+      if (session === this.switchSession) this.syncProviderSelect();
+      return;
+    }
+    // A newer switch superseded this resolution while awaiting; the winning
+    // call owns the picker and stack, so bail without touching either.
+    if (session !== this.switchSession) return;
+    // A recording may have started while an async listFrames() was pending (the
+    // picker only disables once recording begins, which is after this switch
+    // started); tearing down the stack now would corrupt that export, so bail
+    // and restore the picker to the still-active provider.
+    if (this.recording) {
+      this.syncProviderSelect();
+      return;
+    }
+    if (frames.length === 0) {
+      this.syncProviderSelect();
+      return;
+    }
+    this.pause();
+    this.removeStack();
+    removeTimelapseStoreLayers();
+    this.provider = provider;
+    this.frames = frames;
+    this.frameIndex = 0;
+    this.ensureStack();
+    // Re-render the panel body so the slider bounds/labels and attribution
+    // reflect the new frame set (renderInto rebuilds it from scratch, which
+    // also selects the active provider in the picker).
+    if (this.container) this.renderInto(this.container);
+  }
+
+  /**
+   * Restore the provider `<select>`'s displayed value to the active provider,
+   * after an early return that did not apply the user's picked option (the
+   * browser moves the native select on `change` before the handler runs).
+   */
+  private syncProviderSelect(): void {
+    if (this.providerSelect) this.providerSelect.value = this.provider.id;
   }
 
   /**
@@ -519,6 +652,8 @@ export class TimelapseControl {
   /** Release DOM owned outside the panel container (the on-map year badge). */
   dispose(): void {
     this.stopForTeardown();
+    this.clearTilesReadyTimer();
+    this.clearTilesReadyIdleHandler();
     this.badge?.remove();
     this.badge = null;
   }
@@ -577,19 +712,48 @@ export class TimelapseControl {
   /**
    * Disable Play (cosmetically) until the pre-warmed stack has fetched its
    * first round of tiles; the per-tick source gate is the real protection.
+   * Play is re-enabled on whichever comes first — the map going `idle` or the
+   * {@link TILES_READY_FALLBACK_MS} fallback — so a tile host that never lets
+   * the map settle (a slow or partly-404 source such as GIBS over ocean) can't
+   * leave the button stuck disabled.
    */
   private armTilesReadyGate(): void {
     this.tilesReady = false;
+    this.clearTilesReadyTimer();
     this.updateUi();
     const map = this.map;
     if (!map || typeof map.once !== "function") {
       this.tilesReady = true;
       return;
     }
-    map.once("idle", () => {
+    // Drop a still-pending `idle` listener from a prior arm (e.g. a provider
+    // switch before the last stack settled), so its stale closure can't flip
+    // the new gate ready when `idle` finally fires.
+    this.clearTilesReadyIdleHandler();
+    const markReady = (): void => {
+      this.clearTilesReadyTimer();
+      this.clearTilesReadyIdleHandler();
+      if (this.tilesReady) return;
       this.tilesReady = true;
       this.updateUi();
-    });
+    };
+    this.tilesReadyIdleHandler = markReady;
+    map.once("idle", markReady);
+    this.tilesReadyTimer = setTimeout(markReady, TILES_READY_FALLBACK_MS);
+  }
+
+  private clearTilesReadyTimer(): void {
+    if (this.tilesReadyTimer !== null) {
+      clearTimeout(this.tilesReadyTimer);
+      this.tilesReadyTimer = null;
+    }
+  }
+
+  private clearTilesReadyIdleHandler(): void {
+    if (this.tilesReadyIdleHandler) {
+      this.map?.off?.("idle", this.tilesReadyIdleHandler);
+      this.tilesReadyIdleHandler = null;
+    }
   }
 
   // --- Recording ----------------------------------------------------------------
@@ -645,6 +809,7 @@ export class TimelapseControl {
    * each time the panel opens; returns the cleanup the host runs on close.
    */
   renderInto(container: HTMLElement): () => void {
+    this.container = container;
     container.innerHTML = "";
     // Tag the panel so index.css can theme its native form controls (the
     // select's option popup cannot be styled inline).
@@ -654,6 +819,27 @@ export class TimelapseControl {
     container.style.gap = "8px";
     container.style.padding = "10px 12px";
     container.style.fontSize = "12px";
+
+    // Imagery-provider picker — shown only when more than one provider is
+    // registered (a single-provider install has nothing to switch between).
+    const providers = listTimelapseProviders();
+    if (providers.length > 1) {
+      const providerSelect = document.createElement("select");
+      styleThemedSelect(providerSelect);
+      providerSelect.style.width = "100%";
+      for (const item of providers) {
+        const option = document.createElement("option");
+        option.value = item.id;
+        option.textContent = item.name;
+        option.selected = item.id === this.provider.id;
+        providerSelect.appendChild(option);
+      }
+      providerSelect.addEventListener("change", () => {
+        void this.switchProvider(providerSelect.value);
+      });
+      this.providerSelect = providerSelect;
+      container.appendChild(providerSelect);
+    }
 
     // Year slider with range labels.
     const sliderRow = document.createElement("div");
@@ -720,21 +906,7 @@ export class TimelapseControl {
     speedLabel.appendChild(speedText);
     this.speedText = speedText;
     const speedSelect = document.createElement("select");
-    // Inline (not just the index.css block, which themes the option popup):
-    // rules from other control stylesheets can outrank a class selector here.
-    speedSelect.style.background = "hsl(var(--background))";
-    // `important` is required: with the app's global `transition: all` on form
-    // controls, Chromium keeps reporting the select's pre-theme (black) text
-    // color for a plain inline declaration; the important priority is the only
-    // level observed to actually take effect in both themes.
-    speedSelect.style.setProperty(
-      "color",
-      "hsl(var(--foreground))",
-      "important",
-    );
-    speedSelect.style.border = "1px solid hsl(var(--border))";
-    speedSelect.style.borderRadius = "4px";
-    speedSelect.style.padding = "2px 4px";
+    styleThemedSelect(speedSelect);
     for (const step of TIMELAPSE_SPEED_STEPS) {
       const option = document.createElement("option");
       option.value = String(step);
@@ -783,6 +955,42 @@ export class TimelapseControl {
     recordRow.appendChild(recordStatus);
     container.appendChild(recordRow);
 
+    // Legend (thematic providers only, e.g. land-cover classes). The colors
+    // are the data, so this is rendered where imagery providers show nothing.
+    const legendItems = this.provider.legend;
+    if (legendItems && legendItems.length > 0) {
+      const legend = document.createElement("div");
+      legend.style.display = "flex";
+      legend.style.flexDirection = "column";
+      legend.style.gap = "3px";
+      legend.style.fontSize = "10px";
+      const heading = document.createElement("div");
+      heading.style.fontWeight = "600";
+      heading.style.opacity = "0.8";
+      this.legendHeading = heading;
+      legend.appendChild(heading);
+      const grid = document.createElement("div");
+      grid.style.display = "grid";
+      grid.style.gridTemplateColumns = "auto 1fr";
+      grid.style.gap = "2px 6px";
+      grid.style.alignItems = "center";
+      for (const item of legendItems) {
+        const swatch = document.createElement("span");
+        swatch.style.width = "12px";
+        swatch.style.height = "12px";
+        swatch.style.flexShrink = "0";
+        swatch.style.borderRadius = "2px";
+        swatch.style.background = item.color;
+        swatch.style.border = "1px solid hsl(var(--border))";
+        const text = document.createElement("span");
+        text.textContent = item.label;
+        grid.appendChild(swatch);
+        grid.appendChild(text);
+      }
+      legend.appendChild(grid);
+      container.appendChild(legend);
+    }
+
     // Attribution (per-frame, year-specific — updated in updateUi).
     const attribution = document.createElement("div");
     attribution.style.fontSize = "10px";
@@ -796,6 +1004,8 @@ export class TimelapseControl {
 
     return () => {
       // The card body is discarded on close; only the on-map badge outlives it.
+      this.container = null;
+      this.providerSelect = null;
       this.slider = null;
       this.playButton = null;
       this.yearLabel = null;
@@ -805,6 +1015,7 @@ export class TimelapseControl {
       this.recordButton = null;
       this.recordStatus = null;
       this.attributionLine = null;
+      this.legendHeading = null;
     };
   }
 
@@ -832,6 +1043,10 @@ export class TimelapseControl {
 
   /** Re-apply the current {@link labels} to the static panel strings. */
   refreshLabels(): void {
+    if (this.providerSelect) {
+      this.providerSelect.setAttribute("aria-label", labels.provider);
+    }
+    if (this.legendHeading) this.legendHeading.textContent = labels.legend;
     if (this.slider) {
       this.slider.setAttribute("aria-label", labels.yearSlider);
     }
@@ -879,6 +1094,10 @@ export class TimelapseControl {
         !this.tilesReady && !this.recording ? labels.loadingTiles : "";
     }
     if (this.slider) this.slider.disabled = this.recording;
+    // Switching providers mid-recording would tear down the layers the export
+    // is drawing from, so the picker is inert while recording; disable it too
+    // (mirroring the slider) instead of looking interactive but silently no-op.
+    if (this.providerSelect) this.providerSelect.disabled = this.recording;
     if (this.attributionLine && frame) {
       // Trust assumption: attribution HTML comes from the frame's provider.
       // The built-in EOX string is fixed, and registerTimelapseProvider is

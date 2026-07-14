@@ -426,8 +426,15 @@ export {
   EOX_S2CLOUDLESS_PROVIDER_ID,
   getTimelapseProvider,
   listTimelapseProviders,
+  MODIS_LANDCOVER_PROVIDER_ID,
+  modisLandCoverProvider,
+  NASA_GIBS_WELD_NDVI_PROVIDER_ID,
+  NASA_GIBS_WELD_PROVIDER_ID,
+  nasaGibsWeldNdviProvider,
+  nasaGibsWeldProvider,
   registerTimelapseProvider,
   type TimelapseFrame,
+  type TimelapseLegendItem,
   type TimelapseProvider,
 } from "./plugins/timelapse-providers";
 export {

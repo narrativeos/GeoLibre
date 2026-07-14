@@ -10,7 +10,10 @@ import {
   TIMELAPSE_SOURCE_KIND,
   timelapseStoreLayerId,
 } from "../packages/plugins/src/plugins/maplibre-timelapse";
-import { registerTimelapseProvider } from "../packages/plugins/src/plugins/timelapse-providers";
+import {
+  NASA_GIBS_WELD_PROVIDER_ID,
+  registerTimelapseProvider,
+} from "../packages/plugins/src/plugins/timelapse-providers";
 import type {
   GeoLibreAppAPI,
   GeoLibreFloatingPanelRegistration,
@@ -197,6 +200,178 @@ describe("maplibreTimelapsePlugin", () => {
     // The stack and store layer are untouched by a reposition.
     assert.equal(map.layers.size, FRAME_COUNT);
     assert.ok(storeLayer());
+  });
+
+  it("switchProvider rebuilds the stack and store layer for the new provider", async () => {
+    const map = fakeMap();
+    plugin.activate(fakeApp(map));
+    const control = getActiveTimelapseControl();
+    assert.ok(control);
+    assert.equal(control.provider.id, "eox-s2cloudless");
+
+    await control.switchProvider("nasa-gibs-landsat-weld");
+
+    // The EOX stack is gone and the nine-year GIBS stack replaced it.
+    assert.equal(control.provider.id, "nasa-gibs-landsat-weld");
+    assert.equal(control.frames.length, 9);
+    assert.equal(map.sources.size, 9);
+    assert.equal(map.layers.size, 9);
+    assert.ok(map.sources.has("timelapse-source-gibs-weld-1983"));
+    assert.ok(!map.sources.has("timelapse-source-s2cloudless-2018"));
+    const gibsSource = map.sources.get("timelapse-source-gibs-weld-1983") as {
+      tiles: string[];
+    };
+    assert.ok(gibsSource.tiles[0].includes("/1983-12-01/"));
+
+    // Exactly one mirroring store layer, now keyed to the GIBS provider, and
+    // the switch resets playback to the oldest year (index 0 → 1983).
+    const layers = useAppStore
+      .getState()
+      .layers.filter(
+        (item) => item.metadata.sourceKind === TIMELAPSE_SOURCE_KIND,
+      );
+    assert.equal(layers.length, 1);
+    assert.equal(
+      layers[0].id,
+      timelapseStoreLayerId(NASA_GIBS_WELD_PROVIDER_ID),
+    );
+    assert.equal(control.getFrameIndex(), 0);
+    assert.equal(control.getState().year, 1983);
+  });
+
+  it("switchProvider is a no-op when the id resolves to the active provider", async () => {
+    const map = fakeMap();
+    plugin.activate(fakeApp(map));
+    const control = getActiveTimelapseControl();
+    assert.ok(control);
+
+    await control.switchProvider("eox-s2cloudless");
+    await control.switchProvider("no-such-provider");
+
+    assert.equal(control.provider.id, "eox-s2cloudless");
+    assert.equal(map.sources.size, FRAME_COUNT);
+  });
+
+  it("switchProvider ignores a superseded async resolution", async () => {
+    const map = fakeMap();
+    plugin.activate(fakeApp(map));
+    const control = getActiveTimelapseControl();
+    assert.ok(control);
+
+    // A slow async provider whose frames we resolve by hand, and a fast one.
+    let resolveSlow: (frames: unknown[]) => void = () => {};
+    registerTimelapseProvider({
+      id: "slow-a",
+      name: "Slow A",
+      attribution: "a",
+      listFrames: () =>
+        new Promise((resolve) => {
+          resolveSlow = resolve as (frames: unknown[]) => void;
+        }) as never,
+    });
+    registerTimelapseProvider({
+      id: "fast-b",
+      name: "Fast B",
+      attribution: "b",
+      listFrames: () => [
+        {
+          id: "b-2100",
+          label: "2100",
+          year: 2100,
+          tileUrlTemplate: "https://example.test/b/{z}/{y}/{x}.png",
+          attribution: "b",
+        },
+      ],
+    });
+
+    // Pick the slow provider (suspends), then the fast one (applies now).
+    const slowSwitch = control.switchProvider("slow-a");
+    await control.switchProvider("fast-b");
+    assert.equal(control.provider.id, "fast-b");
+
+    // The stale slow resolution lands last but must not clobber the newer pick.
+    resolveSlow([
+      {
+        id: "a-1900",
+        label: "1900",
+        year: 1900,
+        tileUrlTemplate: "https://example.test/a/{z}/{y}/{x}.png",
+        attribution: "a",
+      },
+    ]);
+    await slowSwitch;
+    assert.equal(control.provider.id, "fast-b");
+  });
+
+  it("switchProvider bails if a recording starts while an async switch is pending", async () => {
+    const map = fakeMap();
+    plugin.activate(fakeApp(map));
+    const control = getActiveTimelapseControl();
+    assert.ok(control);
+
+    let resolveSlow: (frames: unknown[]) => void = () => {};
+    registerTimelapseProvider({
+      id: "slow-rec",
+      name: "Slow Rec",
+      attribution: "s",
+      listFrames: () =>
+        new Promise((resolve) => {
+          resolveSlow = resolve as (frames: unknown[]) => void;
+        }) as never,
+    });
+
+    const pending = control.switchProvider("slow-rec");
+    // A recording begins while the async listFrames() is still in flight.
+    (control as unknown as { recording: boolean }).recording = true;
+    resolveSlow([
+      {
+        id: "slow-2100",
+        label: "2100",
+        year: 2100,
+        tileUrlTemplate: "https://example.test/s/{z}/{y}/{x}.png",
+        attribution: "s",
+      },
+    ]);
+    await pending;
+
+    // The switch must not tear down the stack the recorder is drawing from.
+    assert.equal(control.provider.id, "eox-s2cloudless");
+    assert.equal(map.sources.size, FRAME_COUNT);
+  });
+
+  it("re-selecting the active provider cancels a pending async switch", async () => {
+    const map = fakeMap();
+    plugin.activate(fakeApp(map));
+    const control = getActiveTimelapseControl();
+    assert.ok(control);
+
+    let resolveSlow: (frames: unknown[]) => void = () => {};
+    registerTimelapseProvider({
+      id: "slow-cancel",
+      name: "Slow Cancel",
+      attribution: "s",
+      listFrames: () =>
+        new Promise((resolve) => {
+          resolveSlow = resolve as (frames: unknown[]) => void;
+        }) as never,
+    });
+
+    const pending = control.switchProvider("slow-cancel");
+    // Re-picking the still-active provider must cancel the pending switch.
+    await control.switchProvider("eox-s2cloudless");
+    resolveSlow([
+      {
+        id: "slow-2100",
+        label: "2100",
+        year: 2100,
+        tileUrlTemplate: "https://example.test/s/{z}/{y}/{x}.png",
+        attribution: "s",
+      },
+    ]);
+    await pending;
+
+    assert.equal(control.provider.id, "eox-s2cloudless");
+    assert.equal(map.sources.size, FRAME_COUNT);
   });
 
   it("swaps a year with exactly two raster-opacity writes", () => {
