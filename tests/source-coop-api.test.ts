@@ -16,7 +16,9 @@ import {
   parseProduct,
   parseProductList,
   parseProductRef,
+  productUrl,
   SOURCE_COOP_DATA_BASE,
+  synthesizeProduct,
   type SourceCoopFetch,
   type SourceCoopProduct,
 } from "../packages/plugins/src/plugins/source-coop-api";
@@ -117,6 +119,59 @@ describe("parseProduct", () => {
     assert.deepEqual(
       parseProduct(rawProduct({ metadata: { tags: ["ok", 7] } }))?.tags,
       ["ok"],
+    );
+  });
+});
+
+describe("productUrl", () => {
+  it("is the single source of the product page link", () => {
+    assert.equal(
+      productUrl("opengeos", "natural-earth"),
+      "https://source.coop/opengeos/natural-earth",
+    );
+  });
+
+  it("agrees with every record producer, so the three cannot drift", () => {
+    const expected = productUrl("opengeos", "natural-earth");
+    assert.equal(
+      synthesizeProduct("opengeos", "natural-earth", "Natural Earth").url,
+      expected,
+    );
+    assert.equal(
+      parseProduct({ account_id: "opengeos", product_id: "natural-earth" })?.url,
+      expected,
+    );
+    const [fromFeed] = parseFeed(
+      `<rss><channel><item><title>Natural Earth</title>` +
+        `<link>https://source.coop/opengeos/natural-earth</link>` +
+        `</item></channel></rss>`,
+    );
+    assert.equal(fromFeed.url, expected);
+  });
+});
+
+describe("synthesizeProduct", () => {
+  it("builds a usable record from an id alone, for a pinned panel", () => {
+    const product = synthesizeProduct("opengeos", "natural-earth", "Natural Earth");
+    assert.equal(product.accountId, "opengeos");
+    assert.equal(product.productId, "natural-earth");
+    assert.equal(product.title, "Natural Earth");
+    assert.equal(product.url, "https://source.coop/opengeos/natural-earth");
+    // Left empty for a later fetchProduct to fill in.
+    assert.equal(product.description, "");
+    assert.deepEqual(product.tags, []);
+    assert.equal(product.updatedAt, null);
+    assert.equal(product.featured, false);
+  });
+
+  it("produces the ids that drive a file listing, so no metadata read is needed", () => {
+    const product = synthesizeProduct("opengeos", "natural-earth", "Natural Earth");
+    assert.equal(
+      buildListObjectsUrl({
+        accountId: product.accountId,
+        prefix: `${product.productId}/`,
+      }),
+      `${SOURCE_COOP_DATA_BASE}/opengeos?list-type=2&prefix=natural-earth%2F&max-keys=200&delimiter=%2F`,
     );
   });
 });

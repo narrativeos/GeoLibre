@@ -45,6 +45,14 @@
 /** The Source Cooperative website (used for human-facing product links). */
 export const SOURCE_COOP_SITE = "https://source.coop";
 
+/**
+ * A product's page on source.coop — the human-facing link, not the data URL
+ * (that is `buildObjectUrl`, on a different host).
+ */
+export function productUrl(accountId: string, productId: string): string {
+  return `${SOURCE_COOP_SITE}/${accountId}/${productId}`;
+}
+
 /** The metadata API. Not reachable from a browser: it sends no CORS headers. */
 export const SOURCE_COOP_API_BASE = "https://source.coop/api/v1";
 
@@ -189,7 +197,34 @@ export function parseProduct(raw: unknown): SourceCoopProduct | null {
     updatedAt: asString(record.updated_at) || null,
     // `featured` is a *number* in the API (a rank), not a boolean.
     featured: typeof record.featured === "number" && record.featured > 0,
-    url: `${SOURCE_COOP_SITE}/${accountId}/${productId}`,
+    url: productUrl(accountId, productId),
+  };
+}
+
+/**
+ * Builds a product record from an id alone, without touching the network.
+ *
+ * A product's *files* are listed straight off `data.source.coop` from the
+ * account and product id (see `buildListObjectsUrl`), so a panel pinned to a
+ * known product needs no metadata read to be useful — and this keeps it working
+ * when the metadata API, or the Worker proxy in front of it, is unreachable.
+ * The fields the API would supply are left empty for a later `fetchProduct` to
+ * fill in.
+ */
+export function synthesizeProduct(
+  accountId: string,
+  productId: string,
+  title: string,
+): SourceCoopProduct {
+  return {
+    accountId,
+    productId,
+    title,
+    description: "",
+    tags: [],
+    updatedAt: null,
+    featured: false,
+    url: productUrl(accountId, productId),
   };
 }
 
@@ -258,7 +293,7 @@ export function parseFeed(xml: string): SourceCoopProduct[] {
           ? parsedDate.toISOString()
           : null,
       featured: false,
-      url: `${SOURCE_COOP_SITE}/${ref.accountId}/${ref.productId}`,
+      url: productUrl(ref.accountId, ref.productId),
     });
   }
   return products;

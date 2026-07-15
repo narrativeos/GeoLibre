@@ -350,10 +350,13 @@ export {
 } from "./plugins/openaerialmap-api";
 export {
   DEFAULT_SOURCE_COOP_LABELS,
+  maplibreNaturalEarthPlugin,
   maplibreSourceCoopPlugin,
+  NATURAL_EARTH_PLUGIN_ID,
   setSourceCoopLabels,
   SOURCE_COOP_PLUGIN_ID,
   type SourceCoopLabels,
+  type SourceCoopPinnedProduct,
 } from "./plugins/maplibre-source-coop";
 export {
   buildListObjectsUrl,
@@ -369,8 +372,10 @@ export {
   parseProduct,
   parseProductList,
   parseProductRef,
+  productUrl,
   SOURCE_COOP_DATA_BASE,
   SOURCE_COOP_PROXY_ENDPOINT,
+  synthesizeProduct,
   type SourceCoopFormat,
   type SourceCoopListing,
   type SourceCoopObject,
