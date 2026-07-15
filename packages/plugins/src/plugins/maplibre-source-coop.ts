@@ -29,6 +29,7 @@ import type { GeoLibreAppAPI, GeoLibrePlugin } from "../types";
 import { addPMTilesLayerFromUrl } from "./maplibre-components";
 import { addVectorLayerFromUrl } from "./maplibre-vector";
 import {
+  canStream,
   fetchAccountProducts,
   fetchCatalog,
   fetchProduct,
@@ -36,15 +37,20 @@ import {
   formatBytes,
   HTTP_URL_RE,
   isAddable,
+  isTooLargeToOpen,
   listProductObjects,
+  MAX_VECTOR_BYTES,
+  objectNote,
   parseProductRef,
   SOURCE_COOP_API_BASE,
   SOURCE_COOP_FEED_URL,
   SOURCE_COOP_PROXY_ENDPOINT,
   synthesizeProduct,
+  usesDuckDB,
   type SourceCoopClientOptions,
   type SourceCoopFetch,
   type SourceCoopFormat,
+  type SourceCoopIngestMode,
   type SourceCoopObject,
   type SourceCoopProduct,
 } from "./source-coop-api";
@@ -73,19 +79,31 @@ export interface SourceCoopLabels {
   add: string;
   adding: string;
   added: string;
+  stream: string;
+  streaming: string;
   remove: string;
   download: string;
   copyUrl: string;
   copied: string;
   openProduct: string;
   addTitle: string;
+  streamTitle: string;
   removeTitle: string;
   downloadTitle: string;
   copyUrlTitle: string;
   openProductTitle: string;
   unsupportedTitle: string;
   addError: (message: string) => string;
+  /** Shown for a big PMTiles/COG, which genuinely reads only the tiles in view. */
   largeFileWarning: (size: string) => string;
+  /** Nudge toward Stream on a GeoParquet big enough that a copy may not fit. */
+  streamHint: (size: string) => string;
+  /**
+   * Shown for a vector file past what DuckDB-WASM can open at all. `limit` is
+   * rendered from `MAX_VECTOR_BYTES` rather than written into the sentence, so
+   * the number the user reads cannot drift from the gate that produced it.
+   */
+  tooLargeToOpen: (size: string, limit: string) => string;
 }
 
 export const DEFAULT_SOURCE_COOP_LABELS: SourceCoopLabels = {
@@ -110,12 +128,17 @@ export const DEFAULT_SOURCE_COOP_LABELS: SourceCoopLabels = {
   add: "Add",
   adding: "Adding…",
   added: "Added",
+  stream: "Stream",
+  streaming: "Streaming",
   remove: "Remove",
   download: "Download",
   copyUrl: "Copy URL",
   copied: "Copied",
   openProduct: "Open on source.coop",
   addTitle: "Add this file to the map",
+  streamTitle:
+    "Query this file where it sits, reading only the parts in view. " +
+    "The whole file is never copied into DuckDB — best for large files.",
   removeTitle: "Remove this file from the map",
   downloadTitle: "Download this file",
   copyUrlTitle: "Copy this file's URL",
@@ -124,6 +147,15 @@ export const DEFAULT_SOURCE_COOP_LABELS: SourceCoopLabels = {
   addError: (message) => `Could not add this file: ${message}`,
   largeFileWarning: (size) =>
     `This file is ${size}. It streams from the source, so only the parts in view are read.`,
+  streamHint: (size) =>
+    `This file is ${size}. Add copies it into memory; Stream reads only the parts in view.`,
+  // The limit is formatted by the same formatBytes as `size`, so the two halves
+  // of the sentence cannot disagree on units. (That matters here: formatBytes is
+  // 1024-based but labels its units GB/MB, so a hand-written "2 GiB" would read
+  // against a "19.2 GB" produced by the same function.)
+  tooLargeToOpen: (size, limit) =>
+    `This file is ${size} — too large for the browser to open (${limit} limit). ` +
+    `Download it, or use a partitioned version of this dataset.`,
 };
 
 let labels: SourceCoopLabels = { ...DEFAULT_SOURCE_COOP_LABELS };
@@ -169,6 +201,9 @@ const CSS = {
   sub:
     "font-size:10px;color:hsl(var(--muted-foreground));white-space:nowrap;" +
     "overflow:hidden;text-overflow:ellipsis;",
+  // Like `sub`, but wraps: the advisory lines under a file's size are whole
+  // sentences, which `sub`'s nowrap+ellipsis would cut off at the first line.
+  note: "font-size:10px;color:hsl(var(--muted-foreground));line-height:1.4;",
   desc:
     "font-size:11px;color:hsl(var(--muted-foreground));line-height:1.4;" +
     "display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;" +
@@ -299,24 +334,51 @@ function button(text: string, style: string, title?: string): HTMLButtonElement 
  * button stays correct across a project reload, and after the user removes the
  * layer from the Layers panel.
  */
-function findAddedLayerId(object: SourceCoopObject): string | undefined {
+function findAddedLayer(object: SourceCoopObject) {
   return useAppStore
     .getState()
-    .layers.find((layer) => layer.sourcePath === object.url)?.id;
+    .layers.find((layer) => layer.sourcePath === object.url);
 }
 
-function isAdded(object: SourceCoopObject): boolean {
-  return findAddedLayerId(object) !== undefined;
+function findAddedLayerId(object: SourceCoopObject): string | undefined {
+  return findAddedLayer(object)?.id;
+}
+
+/**
+ * The mode a layer was actually added with, read off the record the vector
+ * control synced into the store (`serializableVectorState` in
+ * vector-layer-sync.ts). Read rather than remembered for the same reason as
+ * {@link findAddedLayer}, and because the control downgrades `stream` to
+ * `table` on its own whenever a file cannot be streamed — so this reports what
+ * happened, not what was asked for. Undefined when the file is not on the map,
+ * and for a PMTiles/COG layer, which has no ingest mode.
+ *
+ * Takes the layer rather than the object so a card can settle both questions it
+ * has for the store — is this added, and how — from one lookup.
+ */
+function ingestModeOf(
+  layer: ReturnType<typeof findAddedLayer>,
+): SourceCoopIngestMode | undefined {
+  const vectorState = layer?.metadata.vectorState;
+  if (typeof vectorState !== "object" || vectorState === null) return undefined;
+  const mode = (vectorState as { ingestMode?: unknown }).ingestMode;
+  return mode === "stream" || mode === "table" ? mode : undefined;
 }
 
 /**
  * Puts one file on the map, routing by format to the control that already
  * handles it (see the module comment). Returns false when the format has no
  * renderer, which the caller renders as download-only.
+ *
+ * @param ingestMode - How a vector file is read: `table` copies it into DuckDB,
+ *   `stream` queries it in place. Only GeoParquet honours `stream`; the vector
+ *   control silently falls back to `table` for every other format, which is why
+ *   only a GeoParquet card offers the choice (see {@link canStream}).
  */
 async function addObjectToMap(
   app: GeoLibreAppAPI | null,
   object: SourceCoopObject,
+  ingestMode: SourceCoopIngestMode = "table",
 ): Promise<boolean> {
   // The URL is built by buildObjectUrl from an https base, but re-check at the
   // point it becomes a map source so this security-sensitive step stands alone.
@@ -329,14 +391,12 @@ async function addObjectToMap(
       if (!app.addCogLayer) return false;
       await app.addCogLayer(object.name, object.url);
       return true;
-    case "geoparquet":
-    case "geojson":
-    case "flatgeobuf":
-    case "gpkg":
-    case "csv":
-      return addVectorLayerFromUrl(app, object.url, { name: object.name });
     default:
-      return false;
+      if (!usesDuckDB(object.format)) return false;
+      return addVectorLayerFromUrl(app, object.url, {
+        name: object.name,
+        ingestMode,
+      });
   }
 }
 
@@ -379,11 +439,46 @@ function objectSubtitle(object: SourceCoopObject): string {
     : `${size} · ${date.toLocaleDateString()}`;
 }
 
-/** Files at or above this size get a note that they stream rather than download. */
-const LARGE_FILE_BYTES = 2 * 1024 ** 3;
-
 function formatLabel(format: SourceCoopFormat): string {
   return format === "other" ? "file" : format;
+}
+
+/**
+ * Renders {@link objectNote}'s decision with the current translations, against
+ * what the card is currently doing — a note has to agree with the buttons
+ * beside it, and both of these notes describe something the card may have
+ * already moved past.
+ *
+ * @param state - Whether the file is on the map, and whether an add is in
+ *   flight for it.
+ */
+function noteText(
+  object: SourceCoopObject,
+  state: { added: boolean; pending: boolean },
+): string {
+  const size = formatBytes(object.size);
+  switch (objectNote(object)) {
+    case "streams":
+      // A fact about the file rather than about a choice — true whether or not
+      // it is on the map, so it always stands.
+      return labels.largeFileWarning(size);
+    case "streamChoice":
+      // A decision aid for two buttons that are disabled the moment the choice
+      // is made and gone once the file is on the map. Past that it reads as
+      // advice for an action no longer on offer, and the Streaming badge
+      // reports the outcome instead.
+      return state.added || state.pending ? "" : labels.streamHint(size);
+    case "tooLarge":
+      // A file already on the map is demonstrably openable — it was added when
+      // the listing was smaller, or under an earlier MAX_VECTOR_BYTES — and its
+      // Remove button works (see the title below). Claiming it is too large to
+      // open would contradict the button directly beneath it.
+      return state.added
+        ? ""
+        : labels.tooLargeToOpen(size, formatBytes(MAX_VECTOR_BYTES));
+    default:
+      return "";
+  }
 }
 
 /**
@@ -434,7 +529,9 @@ function buildPanel(
   // so it cannot share `inflight`: `beginRequest()` would abort the file
   // listing it races. It gets its own controller, torn down with the rest.
   let enrichInflight: AbortController | null = null;
-  const addInFlight = new Set<string>();
+  /** Files being added, mapped to the mode they are being added with, so the
+   * card can show the pending label on the button the user actually clicked. */
+  const addInFlight = new Map<string, SourceCoopIngestMode>();
 
   const root = el("div", CSS.panel);
   container.appendChild(root);
@@ -614,18 +711,21 @@ function buildPanel(
     render();
   }
 
-  async function handleAdd(object: SourceCoopObject): Promise<void> {
+  async function handleAdd(
+    object: SourceCoopObject,
+    mode: SourceCoopIngestMode = "table",
+  ): Promise<void> {
     const existing = findAddedLayerId(object);
     if (existing) {
       useAppStore.getState().removeLayer(existing);
       render();
       return;
     }
-    addInFlight.add(object.key);
+    addInFlight.set(object.key, mode);
     error = "";
     render();
     try {
-      const added = await addObjectToMap(app, object);
+      const added = await addObjectToMap(app, object, mode);
       if (!added) error = labels.addError(labels.unsupportedTitle);
     } catch (caught) {
       error = labels.addError(errorMessage(caught));
@@ -664,6 +764,10 @@ function buildPanel(
 
   function renderObjectCard(object: SourceCoopObject): HTMLElement {
     const card = el("div", CSS.card);
+    // One store lookup per card: both questions the card asks — is this on the
+    // map, and how was it read — are answered by the same layer record.
+    const addedLayer = findAddedLayer(object);
+    const added = addedLayer !== undefined;
 
     const titleRow = el("div", CSS.titleRow);
     const name = el("span", CSS.title, object.name);
@@ -672,27 +776,65 @@ function buildPanel(
     name.style.whiteSpace = "nowrap";
     titleRow.appendChild(name);
     titleRow.appendChild(el("span", CSS.formatBadge, formatLabel(object.format)));
+    // Reports how the layer is actually being read, which the control decides:
+    // it downgrades a stream request to a copy for anything it cannot query in
+    // place, and the badge follows that rather than what the user clicked.
+    if (ingestModeOf(addedLayer) === "stream") {
+      titleRow.appendChild(el("span", CSS.badge, labels.streaming));
+    }
     card.appendChild(titleRow);
     card.appendChild(el("div", CSS.sub, objectSubtitle(object)));
 
-    if (isAddable(object.format) && object.size >= LARGE_FILE_BYTES) {
-      card.appendChild(
-        el("div", CSS.sub, labels.largeFileWarning(formatBytes(object.size))),
-      );
-    }
+    const pendingMode = addInFlight.get(object.key);
+    const pending = pendingMode !== undefined;
+
+    const note = noteText(object, { added, pending });
+    if (note) card.appendChild(el("div", CSS.note, note));
 
     const actions = el("div", CSS.actions);
     if (isAddable(object.format)) {
-      const added = isAdded(object);
-      const pending = addInFlight.has(object.key);
+      // Kept visible but inert past the 2 GiB limit: the note above says why,
+      // which is more use than a card that silently drops the button.
+      const tooLarge = isTooLargeToOpen(object);
+
       const addButton = button(
-        pending ? labels.adding : added ? labels.remove : labels.add,
+        pendingMode === "table"
+          ? labels.adding
+          : added
+            ? labels.remove
+            : labels.add,
         added ? CSS.actionActive : CSS.action,
-        added ? labels.removeTitle : labels.addTitle,
+        // `added` wins over `tooLarge`: the button reads Remove and removal
+        // works, so the title has to describe that rather than the size gate.
+        added
+          ? labels.removeTitle
+          : tooLarge
+            ? labels.tooLargeToOpen(
+                formatBytes(object.size),
+                formatBytes(MAX_VECTOR_BYTES),
+              )
+            : labels.addTitle,
       );
-      addButton.disabled = pending;
-      addButton.addEventListener("click", () => void handleAdd(object));
+      addButton.disabled = pending || (tooLarge && !added);
+      addButton.addEventListener("click", () => void handleAdd(object, "table"));
       actions.appendChild(addButton);
+
+      // A second door onto the same layer, so it is offered only while the file
+      // is off the map — once added, Remove above governs either mode. Hidden
+      // past the limit because streaming does not get past it (isTooLargeToOpen).
+      if (canStream(object.format) && !added && !tooLarge) {
+        const streamButton = button(
+          pendingMode === "stream" ? labels.adding : labels.stream,
+          CSS.action,
+          labels.streamTitle,
+        );
+        streamButton.disabled = pending;
+        streamButton.addEventListener(
+          "click",
+          () => void handleAdd(object, "stream"),
+        );
+        actions.appendChild(streamButton);
+      }
     }
 
     const downloadButton = button(

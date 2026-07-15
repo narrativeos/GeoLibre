@@ -328,19 +328,119 @@ export function classifyKey(key: string): SourceCoopFormat {
   return "other";
 }
 
-/** Formats that GeoLibre can put on the map (the rest are download-only). */
-const ADDABLE_FORMATS = new Set<SourceCoopFormat>([
-  "pmtiles",
-  "geoparquet",
-  "cog",
-  "geojson",
-  "flatgeobuf",
-  "gpkg",
-  "csv",
-]);
+/**
+ * Which reader puts a format on the map — the one fact both {@link isAddable}
+ * and {@link usesDuckDB} are really asking about:
+ *
+ * - `duckdb` — read through the vector control, so DuckDB-WASM's limits apply
+ *   (see {@link isTooLargeToOpen}).
+ * - `range` — has its own range-request reader (MapLibre's PMTiles protocol, a
+ *   COG reader). Streams by nature, and none of the DuckDB limits apply.
+ * - `none` — GeoLibre cannot render it; download only.
+ *
+ * One `Record` over the whole union rather than a set per question: adding a
+ * member to {@link SourceCoopFormat} then fails to compile until it is
+ * classified here, so a new format cannot silently inherit the wrong reader's
+ * size rules. Deriving one set from the other would not hold — "addable" and
+ * "goes through DuckDB" are independent facts about a format, and treating
+ * DuckDB as everything-but-PMTiles/COG would quietly subject the next
+ * range-request format to a 2 GiB gate that does not apply to it.
+ */
+const FORMAT_READER: Record<SourceCoopFormat, "duckdb" | "range" | "none"> = {
+  pmtiles: "range",
+  cog: "range",
+  geoparquet: "duckdb",
+  geojson: "duckdb",
+  flatgeobuf: "duckdb",
+  gpkg: "duckdb",
+  csv: "duckdb",
+  other: "none",
+};
 
+/** Whether GeoLibre can put a format on the map (the rest are download-only). */
 export function isAddable(format: SourceCoopFormat): boolean {
-  return ADDABLE_FORMATS.has(format);
+  return FORMAT_READER[format] !== "none";
+}
+
+/** How a vector file is read into DuckDB. Mirrors `IngestMode` in maplibre-gl-vector. */
+export type SourceCoopIngestMode = "table" | "stream";
+
+/** Whether a format reaches the map through the vector control, and so DuckDB-WASM. */
+export function usesDuckDB(format: SourceCoopFormat): boolean {
+  return FORMAT_READER[format] === "duckdb";
+}
+
+/**
+ * Whether a file can be queried in place rather than copied into DuckDB.
+ * GeoParquet only: the vector control ignores `stream` for every other format
+ * and quietly falls back to a copy, so offering the choice elsewhere would be a
+ * button that does nothing different.
+ */
+export function canStream(format: SourceCoopFormat): boolean {
+  return format === "geoparquet";
+}
+
+/**
+ * Largest remote file DuckDB-WASM can open, mirroring `MAX_REMOTE_FILE_BYTES`
+ * in maplibre-gl-vector. Duplicated rather than imported because the constant
+ * is internal to that package; {@link isTooLargeToOpen} explains why this
+ * module needs to know it.
+ */
+export const MAX_VECTOR_BYTES = 2 ** 31 - 1;
+
+/**
+ * PMTiles/COG at or above this size get a note that they stream rather than
+ * download. Deliberately not applied to the DuckDB formats: those do not read
+ * only the parts in view unless the user picks Stream, and at this size they do
+ * not open at all.
+ */
+export const LARGE_FILE_BYTES = 2 * 1024 ** 3;
+
+/**
+ * GeoParquet at or above this size gets a note nudging toward Stream. A copy
+ * materializes into the WASM heap and memory roughly tracks the *decompressed*
+ * dataset — several times a Parquet's on-disk size — which is where a large
+ * file runs the tab out of memory. Below this a copy is cheap enough that the
+ * nudge would be noise; the Stream button is still offered.
+ */
+export const STREAM_HINT_BYTES = 100 * 1024 ** 2;
+
+/**
+ * Whether the browser cannot open a file at all, at either ingest mode.
+ *
+ * DuckDB-WASM's HTTP filesystem holds remote file sizes in 32 bits, so it
+ * rejects anything of 2 GiB or more — and it rejects it *before* the ingest
+ * mode is consulted (`_registerSource` runs ahead of the stream branch in
+ * maplibre-gl-vector's DuckDBEngine), so streaming does not get past this.
+ * Knowing the limit lets the panel say so up front instead of offering an Add
+ * that is certain to fail.
+ */
+export function isTooLargeToOpen(object: SourceCoopObject): boolean {
+  return usesDuckDB(object.format) && object.size > MAX_VECTOR_BYTES;
+}
+
+/**
+ * Which advisory line a file's card should carry, if any. The cases are
+ * mutually exclusive and turn on format, because "large" means something
+ * different per reader: a PMTiles/COG of any size really does read only the
+ * parts in view, a DuckDB-format file past the 2 GiB limit cannot be opened at
+ * either mode, and a big GeoParquet has a real choice to make.
+ *
+ * Returns the decision only — the panel owns the wording (see
+ * `SourceCoopLabels`), which keeps this module DOM- and i18n-free.
+ */
+export type SourceCoopNote = "none" | "streams" | "streamChoice" | "tooLarge";
+
+export function objectNote(object: SourceCoopObject): SourceCoopNote {
+  if (!isAddable(object.format)) return "none";
+  if (isTooLargeToOpen(object)) return "tooLarge";
+  if (!usesDuckDB(object.format)) {
+    return object.size >= LARGE_FILE_BYTES ? "streams" : "none";
+  }
+  if (canStream(object.format) && object.size >= STREAM_HINT_BYTES) {
+    return "streamChoice";
+  }
+  return "none";
 }
 
 /**
