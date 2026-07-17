@@ -30,6 +30,7 @@ import {
   MAX_MAP_GRID_DIM,
   DEFAULT_STORY_MAP,
   MAX_DASHBOARD_COLUMNS,
+  MAX_PROCESSING_HISTORY,
   MIN_DASHBOARD_COLUMNS,
   type AddTileLayerOptions,
   type CollaborationChatMessage,
@@ -45,6 +46,8 @@ import {
   type MapGridLayout,
   type MapViewState,
   type ProcessingModel,
+  type ProcessingRerunRequest,
+  type ProcessingRun,
   type SecondaryMapView,
   type ProjectPluginState,
   type ProjectPreferences,
@@ -159,6 +162,8 @@ export interface AppState {
   storymap: StoryMap | null;
   /** Saved processing pipelines (batch/model chaining; issue #344). */
   models: ProcessingModel[];
+  /** Recorded processing tool runs, oldest first (Processing History; #1292). */
+  processingHistory: ProcessingRun[];
   /** Saved Dashboard panel chart widgets (issue #401). */
   widgets: DashboardWidget[];
   /** Number of columns in the Dashboard widget grid. */
@@ -233,6 +238,14 @@ export interface AppState {
     // save the resulting camera back into this chapter (issue #775).
     storymapComposingId: string | null;
     modelBuilderOpen: boolean;
+    /** Processing History panel visibility (#1292). */
+    processingHistoryOpen: boolean;
+    /**
+     * Pending "re-run from History" request. Written by the History panel just
+     * before it opens the target processing dialog; consumed and cleared by
+     * that dialog once it has pre-filled its parameter form. Null when idle.
+     */
+    processingRerun: ProcessingRerunRequest | null;
     zoomToSelectedFeature: boolean;
     // Live-collaboration dialog visibility. Lifted into the store (rather than
     // local toolbar state) so the on-canvas session-status badge can reopen the
@@ -344,6 +357,8 @@ export interface AppState {
   ) => void;
   setStorymapComposing: (chapterId: string | null) => void;
   setModelBuilderOpen: (open: boolean) => void;
+  setProcessingHistoryOpen: (open: boolean) => void;
+  setProcessingRerun: (request: ProcessingRerunRequest | null) => void;
   setCollaborateDialogOpen: (open: boolean) => void;
   setZoomToSelectedFeature: (enabled: boolean) => void;
 
@@ -351,6 +366,16 @@ export interface AppState {
   saveModel: (model: ProcessingModel) => void;
   /** Remove a saved model by id. */
   deleteModel: (id: string) => void;
+
+  /** Append a processing run to the history (bounded, de-duped by id; #1292). */
+  addProcessingRun: (run: ProcessingRun) => void;
+  /** Patch a recorded run by id (no-op if absent), e.g. to add output layers. */
+  updateProcessingRun: (
+    id: string,
+    patch: Partial<Omit<ProcessingRun, "id">>
+  ) => void;
+  /** Drop all recorded processing runs. */
+  clearProcessingHistory: () => void;
 
   /** Append a new dashboard widget. */
   addWidget: (widget: DashboardWidget) => void;
@@ -645,6 +670,7 @@ export const useAppStore = create<AppState>()(
       legend: { ...DEFAULT_LEGEND_CONFIG },
       storymap: null,
       models: [],
+      processingHistory: [],
       widgets: [],
       dashboardColumns: DEFAULT_DASHBOARD_COLUMNS,
       mapLayout: { ...DEFAULT_MAP_GRID_LAYOUT },
@@ -684,6 +710,8 @@ export const useAppStore = create<AppState>()(
         storymapReturnToEditor: false,
         storymapComposingId: null,
         modelBuilderOpen: false,
+        processingHistoryOpen: false,
+        processingRerun: null,
         zoomToSelectedFeature: false,
         collaborateDialogOpen: false,
       },
@@ -972,6 +1000,10 @@ export const useAppStore = create<AppState>()(
         set((s) => ({ ui: { ...s.ui, storymapComposingId: chapterId } })),
       setModelBuilderOpen: (open) =>
         set((s) => ({ ui: { ...s.ui, modelBuilderOpen: open } })),
+      setProcessingHistoryOpen: (open) =>
+        set((s) => ({ ui: { ...s.ui, processingHistoryOpen: open } })),
+      setProcessingRerun: (request) =>
+        set((s) => ({ ui: { ...s.ui, processingRerun: request } })),
       setCollaborateDialogOpen: (open) =>
         set((s) => ({ ui: { ...s.ui, collaborateDialogOpen: open } })),
       setZoomToSelectedFeature: (enabled) =>
@@ -990,6 +1022,32 @@ export const useAppStore = create<AppState>()(
           models: s.models.filter((m) => m.id !== id),
           isDirty: true,
         })),
+
+      addProcessingRun: (run) =>
+        set((s) => {
+          // Ignore a duplicate id so updateProcessingRun stays unambiguous.
+          if (s.processingHistory.some((r) => r.id === run.id)) return s;
+          const processingHistory = [...s.processingHistory, run].slice(
+            -MAX_PROCESSING_HISTORY,
+          );
+          return { processingHistory, isDirty: true };
+        }),
+      updateProcessingRun: (id, patch) =>
+        set((s) => {
+          if (!s.processingHistory.some((r) => r.id === id)) return s;
+          return {
+            processingHistory: s.processingHistory.map((r) =>
+              r.id === id ? { ...r, ...patch, id: r.id } : r,
+            ),
+            isDirty: true,
+          };
+        }),
+      clearProcessingHistory: () =>
+        set((s) =>
+          s.processingHistory.length === 0
+            ? s
+            : { processingHistory: [], isDirty: true },
+        ),
 
       addWidget: (widget) =>
         set((s) => {
