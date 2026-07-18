@@ -82,7 +82,10 @@ import {
 import {
   atlasEntryName,
   buildAtlasPages,
+  buildLineAtlasPages,
   collectAtlasFeatures,
+  hasLineGeometry,
+  MAX_LINE_ATLAS_PAGES,
   expandBounds,
   listAtlasFields,
   parseAtlasFilter,
@@ -284,6 +287,12 @@ export function PrintLayoutDialog({
   // Atlas / map series: one page per coverage-layer feature (GH #1291).
   const [atlasEnabled, setAtlasEnabled] = useState(false);
   const [atlasLayerId, setAtlasLayerId] = useState("");
+  // Coverage strategy: one page per feature, or pages tiling the layer's line
+  // features in fixed-length stretches (GH #1291 follow-up).
+  const [atlasCoverage, setAtlasCoverage] = useState<"features" | "line">(
+    "features",
+  );
+  const [atlasSegmentKm, setAtlasSegmentKm] = useState("20");
   const [atlasNameField, setAtlasNameField] = useState("");
   const [atlasExtentMode, setAtlasExtentMode] = useState<"margin" | "scale">(
     "margin",
@@ -783,15 +792,40 @@ export function PrintLayoutDialog({
     () => parseAtlasFilter(deferredAtlasFilter),
     [deferredAtlasFilter],
   );
+  // How many features can seed along-a-line coverage (used to message an
+  // empty series and to hide the mode for point/polygon-only layers).
+  const atlasLineFeatureCount = useMemo(
+    () =>
+      atlasLayer?.geojson
+        ? atlasLayer.geojson.features.filter((f) =>
+            hasLineGeometry(f.geometry),
+          ).length
+        : 0,
+    [atlasLayer],
+  );
+  // Segment length rides the deferred lane like the filter: re-segmenting a
+  // long line on every keystroke would jank the input.
+  const deferredSegmentKm = useDeferredValue(atlasSegmentKm);
   const atlasPages = useMemo(
     () =>
-      buildAtlasPages(atlasFeatureInfos, {
-        nameField: atlasNameField || undefined,
-        sortField: atlasSortField || undefined,
-        sortDescending: atlasSortDescending,
-        filter: atlasFilterPredicate ?? undefined,
-      }),
+      atlasCoverage === "line"
+        ? atlasLayer?.geojson
+          ? buildLineAtlasPages(atlasLayer.geojson, {
+              segmentKm: Number(deferredSegmentKm),
+              nameField: atlasNameField || undefined,
+              filter: atlasFilterPredicate ?? undefined,
+            })
+          : []
+        : buildAtlasPages(atlasFeatureInfos, {
+            nameField: atlasNameField || undefined,
+            sortField: atlasSortField || undefined,
+            sortDescending: atlasSortDescending,
+            filter: atlasFilterPredicate ?? undefined,
+          }),
     [
+      atlasCoverage,
+      atlasLayer,
+      deferredSegmentKm,
       atlasFeatureInfos,
       atlasNameField,
       atlasSortField,
@@ -820,11 +854,25 @@ export function PrintLayoutDialog({
   const atlasFilterValid = atlasFilterPredicate !== null;
   const atlasScaleValid =
     atlasExtentMode !== "scale" || Number(atlasScale) > 0;
-  // A visible-but-invalid filter or a blank fixed scale must block the export:
-  // proceeding would silently export all features / arbitrary fitted scales
-  // while the user is looking at an error message.
+  // A floor (not just > 0) keeps a mistyped tiny length from cutting a long
+  // line into an enormous synchronous page list.
+  const atlasSegmentValid =
+    atlasCoverage !== "line" || Number(atlasSegmentKm) >= 0.1;
+  // atlasPages is built from the *deferred* filter/segment values; block the
+  // export while an edit is still catching up so a quick click can never
+  // export the previous configuration's pages.
+  const atlasDeferredPending =
+    atlasFilter !== deferredAtlasFilter ||
+    (atlasCoverage === "line" && atlasSegmentKm !== deferredSegmentKm);
+  // A visible-but-invalid filter, a blank fixed scale, or a blank segment
+  // length must block the export: proceeding would silently export all
+  // features / arbitrary extents while the user is looking at an error.
   const atlasConfigBlocked =
-    atlasEnabled && (!atlasFilterValid || !atlasScaleValid);
+    atlasEnabled &&
+    (!atlasFilterValid ||
+      !atlasScaleValid ||
+      !atlasSegmentValid ||
+      atlasDeferredPending);
   const atlasTokenCtx = useMemo<AtlasTokenContext | null>(
     () =>
       currentAtlasPage
@@ -1041,6 +1089,10 @@ export function PrintLayoutDialog({
     atlasExtentMode,
     atlasMarginPct,
     atlasScale,
+    // Along-a-line coverage: a new segment length can keep the same page
+    // count (sourceIndex signature unchanged) while every extent moved.
+    atlasCoverage,
+    deferredSegmentKm,
   ]);
 
   // Fixed scale is only meaningful on physical paper (like the manual scale
@@ -1834,6 +1886,68 @@ export function PrintLayoutDialog({
                           ))}
                         </Select>
                       </div>
+                      {/* Coverage strategy: per feature, or fixed-length
+                          stretches along the layer's line features. */}
+                      <div className="space-y-1.5">
+                        <Label htmlFor="atlas-coverage">
+                          {t("printLayout.atlas.coverage")}
+                        </Label>
+                        <Select
+                          id="atlas-coverage"
+                          value={atlasCoverage}
+                          disabled={atlasBusy}
+                          onChange={(e) => {
+                            setAtlasCoverage(
+                              e.target.value as "features" | "line",
+                            );
+                            setAtlasIndex(0);
+                          }}
+                        >
+                          <option value="features">
+                            {t("printLayout.atlas.coveragePerFeature")}
+                          </option>
+                          <option value="line">
+                            {t("printLayout.atlas.coverageAlongLine")}
+                          </option>
+                        </Select>
+                      </div>
+                      {atlasCoverage === "line" && (
+                        <div className="space-y-1.5">
+                          <Label htmlFor="atlas-segment-km">
+                            {t("printLayout.atlas.segmentLength")}
+                          </Label>
+                          <Input
+                            id="atlas-segment-km"
+                            inputMode="decimal"
+                            disabled={atlasBusy}
+                            value={atlasSegmentKm}
+                            onChange={(e) =>
+                              setAtlasSegmentKm(
+                                e.target.value.replace(/[^0-9.]/g, ""),
+                              )
+                            }
+                          />
+                          {!atlasSegmentValid && (
+                            <p className="text-xs text-destructive">
+                              {t("printLayout.atlas.segmentRequired")}
+                            </p>
+                          )}
+                          {atlasSegmentValid &&
+                            atlasLineFeatureCount === 0 && (
+                              <p className="text-xs text-destructive">
+                                {t("printLayout.atlas.noLineFeatures")}
+                              </p>
+                            )}
+                          {atlasSegmentValid &&
+                            atlasPageCount >= MAX_LINE_ATLAS_PAGES && (
+                              <p className="text-xs text-destructive">
+                                {t("printLayout.atlas.segmentTruncated", {
+                                  count: MAX_LINE_ATLAS_PAGES,
+                                })}
+                              </p>
+                            )}
+                        </div>
+                      )}
                       <div className="grid grid-cols-2 gap-3">
                         <div className="space-y-1.5">
                           <Label htmlFor="atlas-name-field">
@@ -1936,48 +2050,52 @@ export function PrintLayoutDialog({
                           )}
                         </div>
                       )}
-                      <div className="grid grid-cols-2 gap-3">
-                        <div className="space-y-1.5">
-                          <Label htmlFor="atlas-sort">
-                            {t("printLayout.atlas.sortField")}
-                          </Label>
-                          <Select
-                            id="atlas-sort"
-                            value={atlasSortField}
-                            disabled={atlasBusy}
-                            onChange={(e) => setAtlasSortField(e.target.value)}
-                          >
-                            <option value="">
-                              {t("printLayout.atlas.sortNone")}
-                            </option>
-                            {atlasFields.map((f) => (
-                              <option key={f} value={f}>
-                                {f}
+                      {/* Along-a-line pages follow the line's own chainage,
+                          so ordering controls only apply per-feature mode. */}
+                      {atlasCoverage === "features" && (
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="space-y-1.5">
+                            <Label htmlFor="atlas-sort">
+                              {t("printLayout.atlas.sortField")}
+                            </Label>
+                            <Select
+                              id="atlas-sort"
+                              value={atlasSortField}
+                              disabled={atlasBusy}
+                              onChange={(e) => setAtlasSortField(e.target.value)}
+                            >
+                              <option value="">
+                                {t("printLayout.atlas.sortNone")}
                               </option>
-                            ))}
-                          </Select>
+                              {atlasFields.map((f) => (
+                                <option key={f} value={f}>
+                                  {f}
+                                </option>
+                              ))}
+                            </Select>
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label htmlFor="atlas-sort-dir">
+                              {t("printLayout.atlas.sortOrder")}
+                            </Label>
+                            <Select
+                              id="atlas-sort-dir"
+                              value={atlasSortDescending ? "desc" : "asc"}
+                              disabled={atlasBusy || !atlasSortField}
+                              onChange={(e) =>
+                                setAtlasSortDescending(e.target.value === "desc")
+                              }
+                            >
+                              <option value="asc">
+                                {t("printLayout.atlas.sortAsc")}
+                              </option>
+                              <option value="desc">
+                                {t("printLayout.atlas.sortDesc")}
+                              </option>
+                            </Select>
+                          </div>
                         </div>
-                        <div className="space-y-1.5">
-                          <Label htmlFor="atlas-sort-dir">
-                            {t("printLayout.atlas.sortOrder")}
-                          </Label>
-                          <Select
-                            id="atlas-sort-dir"
-                            value={atlasSortDescending ? "desc" : "asc"}
-                            disabled={atlasBusy || !atlasSortField}
-                            onChange={(e) =>
-                              setAtlasSortDescending(e.target.value === "desc")
-                            }
-                          >
-                            <option value="asc">
-                              {t("printLayout.atlas.sortAsc")}
-                            </option>
-                            <option value="desc">
-                              {t("printLayout.atlas.sortDesc")}
-                            </option>
-                          </Select>
-                        </div>
-                      </div>
+                      )}
                       <div className="space-y-1.5">
                         <Label htmlFor="atlas-filter">
                           {t("printLayout.atlas.filterLabel")}
@@ -2019,6 +2137,11 @@ export function PrintLayoutDialog({
                       <p className="text-xs text-muted-foreground">
                         {t("printLayout.atlas.tokensHint")}
                       </p>
+                      {atlasCoverage === "line" && (
+                        <p className="text-xs text-muted-foreground">
+                          {t("printLayout.atlas.alongLineHint")}
+                        </p>
+                      )}
                     </>
                   )}
                 </div>

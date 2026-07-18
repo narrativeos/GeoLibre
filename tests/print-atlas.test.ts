@@ -4,6 +4,9 @@ import type { Feature, FeatureCollection } from "geojson";
 import {
   atlasEntryName,
   buildAtlasPages,
+  buildLineAtlasPages,
+  hasLineGeometry,
+  MAX_LINE_ATLAS_PAGES,
   expandBounds,
   geometryBounds,
   listAtlasFields,
@@ -389,5 +392,182 @@ describe("atlasEntryName", () => {
   it("falls back to the page number when the pattern collapses", () => {
     assert.equal(atlasEntryName("{atlas.attr:MISSING}", ctx()), "3");
     assert.equal(atlasEntryName("", ctx()), "3-Springfield");
+  });
+});
+
+describe("buildLineAtlasPages", () => {
+  // 1 degree of longitude along the equator is ~111.195 km, so this line is a
+  // convenient known length for segment math.
+  const equatorLine: Feature = {
+    type: "Feature",
+    properties: { river: "Blackfeather", region: "north" },
+    geometry: {
+      type: "LineString",
+      coordinates: [
+        [0, 0],
+        [0.5, 0],
+        [1, 0],
+      ],
+    },
+  };
+
+  it("tiles a line into fixed-length stretches with a trailing remainder", () => {
+    const pages = buildLineAtlasPages(collection([equatorLine]), {
+      segmentKm: 25,
+      nameField: "river",
+    });
+    assert.equal(pages.length, 5);
+    assert.deepEqual(
+      pages.map((p) => [p.properties.km_start, p.properties.km_end]),
+      [
+        [0, 25],
+        [25, 50],
+        [50, 75],
+        [75, 100],
+        [100, 111.2],
+      ],
+    );
+    assert.equal(pages[0].name, "Blackfeather km 0-25");
+    assert.equal(pages[4].name, "Blackfeather km 100-111.2");
+    assert.deepEqual(pages.map((p) => p.index), [0, 1, 2, 3, 4]);
+    // sourceIndex keeps the *feature's* identity: all stretches of one line.
+    assert.deepEqual(pages.map((p) => p.sourceIndex), [0, 0, 0, 0, 0]);
+    // Segment metadata and inherited feature attributes.
+    assert.equal(pages[2].properties.segment, 3);
+    assert.equal(pages[2].properties.segments, 5);
+    assert.equal(pages[2].properties.region, "north");
+  });
+
+  it("produces contiguous, ordered, non-degenerate bounds", () => {
+    const pages = buildLineAtlasPages(collection([equatorLine]), {
+      segmentKm: 25,
+    });
+    let prevWest = -Infinity;
+    for (const p of pages) {
+      const [w, s, e, n] = p.bounds;
+      assert.ok(e > w, "bounds must have width");
+      assert.ok(w >= prevWest, "segments advance along the line");
+      assert.ok(s <= 0 && n >= 0);
+      prevWest = w;
+    }
+    // Adjacent segments share their cut point.
+    assert.ok(Math.abs(pages[0].bounds[2] - pages[1].bounds[0]) < 1e-9);
+  });
+
+  it("skips non-line features and applies the filter to line features", () => {
+    const point = feature({ river: "NotALine" }, [5, 5]);
+    const southern: Feature = {
+      ...equatorLine,
+      properties: { river: "Southern", region: "south" },
+    };
+    const pages = buildLineAtlasPages(
+      collection([point, equatorLine, southern]),
+      {
+        segmentKm: 60,
+        nameField: "river",
+        filter: parseAtlasFilter('region = "south"'),
+      },
+    );
+    assert.equal(pages.length, 2);
+    assert.ok(pages.every((p) => p.name.startsWith("Southern")));
+  });
+
+  it("continues chainage across MultiLineString parts without measuring gaps", () => {
+    const multi: Feature = {
+      type: "Feature",
+      properties: {},
+      geometry: {
+        type: "MultiLineString",
+        coordinates: [
+          [
+            [0, 0],
+            [0.5, 0],
+          ],
+          [
+            [0.6, 0],
+            [1.1, 0],
+          ],
+        ],
+      },
+    };
+    const pages = buildLineAtlasPages(collection([multi]), { segmentKm: 40 });
+    // Two 55.6 km parts = 111.2 km of measured line (the 0.1 degree gap adds
+    // nothing): 40 + 40 + 31.2.
+    assert.equal(pages.length, 3);
+    assert.equal(pages[2].properties.km_end, 111.2);
+    assert.equal(pages[0].name, "Line 1 km 0-40");
+  });
+
+  it("returns no pages for a non-positive segment length", () => {
+    assert.deepEqual(
+      buildLineAtlasPages(collection([equatorLine]), { segmentKm: 0 }),
+      [],
+    );
+    assert.deepEqual(
+      buildLineAtlasPages(collection([equatorLine]), { segmentKm: NaN }),
+      [],
+    );
+  });
+
+  it("keeps per-feature sourceIndex distinct across multiple lines", () => {
+    const second: Feature = {
+      ...equatorLine,
+      properties: { river: "Second" },
+    };
+    const pages = buildLineAtlasPages(collection([equatorLine, second]), {
+      segmentKm: 60,
+    });
+    assert.deepEqual(pages.map((p) => p.sourceIndex), [0, 0, 1, 1]);
+    assert.deepEqual(pages.map((p) => p.index), [0, 1, 2, 3]);
+  });
+
+  it("caps a runaway series at MAX_LINE_ATLAS_PAGES", () => {
+    const pages = buildLineAtlasPages(collection([equatorLine]), {
+      segmentKm: 0.01,
+    });
+    assert.equal(pages.length, MAX_LINE_ATLAS_PAGES);
+  });
+
+  it("finds lines nested in GeometryCollections", () => {
+    const nested: Feature = {
+      type: "Feature",
+      properties: {},
+      geometry: {
+        type: "GeometryCollection",
+        geometries: [
+          { type: "Point", coordinates: [9, 9] },
+          equatorLine.geometry,
+        ],
+      },
+    };
+    assert.equal(hasLineGeometry(nested.geometry), true);
+    assert.equal(hasLineGeometry({ type: "Point", coordinates: [0, 0] }), false);
+    const pages = buildLineAtlasPages(collection([nested]), { segmentKm: 60 });
+    assert.equal(pages.length, 2);
+  });
+
+  it("cuts antimeridian-crossing edges across the dateline, not through 0", () => {
+    const crossing: Feature = {
+      type: "Feature",
+      properties: {},
+      geometry: {
+        type: "LineString",
+        coordinates: [
+          [179, 0],
+          [-179, 0],
+        ],
+      },
+    };
+    // ~222 km edge cut at 100 km: the interpolated cut points must stay near
+    // 180 degrees (in the unwrapped frame), never near 0.
+    const pages = buildLineAtlasPages(collection([crossing]), {
+      segmentKm: 100,
+    });
+    assert.equal(pages.length, 3);
+    for (const p of pages) {
+      const [w, , e] = p.bounds;
+      assert.ok(w >= 179 && e <= 181, `bounds ${p.bounds} left the dateline`);
+      assert.ok(e - w < 2);
+    }
   });
 });
