@@ -679,7 +679,10 @@ export function DesktopShell({
     activePanelId === BROWSER_PANEL_ID ? browserContentEl : pluginContentEl;
   // Render the active panel into the shared host once; re-run when its
   // registration is replaced (re-registration refresh) but not on dock/collapse
-  // changes.
+  // changes. Keyed on the render function identity so that a plugin
+  // re-registering the same id with a new render function tears down the old
+  // render and calls the new one, but title resolution (which returns a new
+  // object each call) does not cause spurious re-runs.
   useEffect(() => {
     const host = pluginContentEl;
     if (!activePanelId || !activePanel) return;
@@ -697,13 +700,18 @@ export function DesktopShell({
       }
       host.replaceChildren();
     };
-  }, [activePanelId, activePanel, pluginContentEl]);
+    // `activePanel` is intentionally narrowed to `activePanel?.render`:
+    // getRightPanel returns a fresh clone each call, so the whole object would
+    // re-run this effect on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePanelId, activePanel?.render, pluginContentEl]);
   // Reset the shared width to the panel's default when a new panel activates
   // (keyed on activePanelId only, so a user resize survives re-registration).
   useEffect(() => {
-    if (!activePanel) return;
+    const panel = activePanelId ? getRightPanel(activePanelId) : undefined;
+    if (!panel) return;
     setPluginPanelWidth(
-      clampPluginPanelWidth(activePanel.defaultWidth ?? PLUGIN_PANEL_DEFAULT_WIDTH),
+      clampPluginPanelWidth(panel.defaultWidth ?? PLUGIN_PANEL_DEFAULT_WIDTH),
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePanelId]);

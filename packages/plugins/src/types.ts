@@ -520,8 +520,19 @@ export interface GeoLibreToolbarMenu {
 export interface GeoLibreFloatingPanelRegistration {
   /** Stable unique id used to open/close the panel. */
   id: string;
-  /** Title shown in the card's title bar. */
-  title: string;
+  /**
+   * Title shown in the card's title bar. Pass a getter function to make the
+   * title reactive: it is re-evaluated on every `getFloatingPanel` call, so it
+   * picks up a new language without re-registering the panel. Caveat: the
+   * registry itself does not subscribe to i18n events, so the getter is only
+   * re-run when a consumer re-reads the panel. Today every host component that
+   * displays a title also calls `useTranslation()`, whose `languageChanged`
+   * re-render re-reads the panel as a side effect; a host that reads a panel
+   * without that subscription would show a stale title after a language switch
+   * until the next registry mutation, and should re-read the panel itself on
+   * language change. A plain string is frozen at registration time.
+   */
+  title: string | (() => string);
   /** Optional icon: a URL or `data:` URI rendered in the title bar. */
   icon?: string;
   /** Preferred card width in px (the host clamps it to a sensible range). */
@@ -590,8 +601,20 @@ export type GeoLibreRightPanelDock =
 export interface GeoLibreRightPanelRegistration {
   /** Stable unique id used to open/collapse/close the panel. */
   id: string;
-  /** Human-readable title shown in the panel header and collapsed rail. */
-  title: string;
+  /**
+   * Human-readable title shown in the panel header and collapsed rail.
+   * Pass a getter function to make the title reactive: it is re-evaluated on
+   * every `getRightPanel` call, so it picks up a new language without
+   * re-registering the panel. Caveat: the registry itself does not subscribe
+   * to i18n events, so the getter is only re-run when a consumer re-reads the
+   * panel. Today every host component that displays a title also calls
+   * `useTranslation()`, whose `languageChanged` re-render re-reads the panel
+   * as a side effect; a host that reads a panel without that subscription
+   * would show a stale title after a language switch until the next registry
+   * mutation, and should re-read the panel itself on language change. A plain
+   * string is frozen at registration time.
+   */
+  title: string | (() => string);
   /**
    * Where the panel docks initially: one of the four positional docks
    * (`left-of-layers`, `right-of-layers`, `left-of-style`, or `right-of-style`,

@@ -1,4 +1,5 @@
 import type { GeoLibreFloatingPanelRegistration } from "./types";
+import { PanelTitleResolver } from "./panel-title";
 
 /**
  * Imperative registry for plugin-owned floating panels.
@@ -22,6 +23,14 @@ export interface FloatingPanelsSnapshot {
 }
 
 const registry = new Map<string, GeoLibreFloatingPanelRegistration>();
+// Title resolution (string/getter normalization, throw/empty fallback, and the
+// per-id warning dedup the accessor relies on because it is called unmemoized
+// in FloatingPanelCard's render body, which re-renders on every pointermove
+// during a drag/resize) is shared with the right-panel registry via
+// PanelTitleResolver. Each registry owns its own instance.
+const titleResolver = new PanelTitleResolver<GeoLibreFloatingPanelRegistration>(
+  "Floating panel",
+);
 const listeners = new Set<() => void>();
 
 let openIds: string[] = [];
@@ -62,7 +71,12 @@ export function registerFloatingPanel(
       "registerFloatingPanel requires a panel with a non-empty id.",
     );
   }
-  if (typeof panel.title !== "string" || panel.title.length === 0) {
+  if (typeof panel.title !== "string" && typeof panel.title !== "function") {
+    throw new Error(
+      `Floating panel "${panel.id}" must have a non-empty title string or a title getter function.`,
+    );
+  }
+  if (typeof panel.title === "string" && panel.title.length === 0) {
     throw new Error(`Floating panel "${panel.id}" must have a non-empty title.`);
   }
   if (typeof panel.render !== "function") {
@@ -70,6 +84,8 @@ export function registerFloatingPanel(
       `Floating panel "${panel.id}" must provide a render(container) function.`,
     );
   }
+  // Normalize title to a resolver so both strings and getters update live.
+  titleResolver.set(panel);
   registry.set(panel.id, panel);
   emit();
   return () => {
@@ -86,6 +102,7 @@ export function unregisterFloatingPanel(id: string): void {
   const wasOpen = openIds.includes(id);
   if (wasOpen) openIds = openIds.filter((openId) => openId !== id);
   registry.delete(id);
+  titleResolver.delete(id);
   emit();
   if (wasOpen) runHook(id, "onClose", panel.onClose);
 }
@@ -138,11 +155,27 @@ export function getOpenFloatingPanels(): string[] {
   return [...openIds];
 }
 
-/** Look up a registered floating panel by id. */
+/**
+ * Look up a registered floating panel by id. Title is always resolved to a
+ * string by re-running the panel's title resolver on every call. The registry
+ * does not itself subscribe to i18n language changes, so live title
+ * translation relies on the consumer re-rendering and re-reading on
+ * `languageChanged`; see the `title` field on
+ * {@link GeoLibreFloatingPanelRegistration} for the full contract a host must
+ * satisfy.
+ */
 export function getFloatingPanel(
   id: string,
-): GeoLibreFloatingPanelRegistration | undefined {
-  return registry.get(id);
+): (GeoLibreFloatingPanelRegistration & { title: string }) | undefined {
+  const panel = registry.get(id);
+  if (!panel) return undefined;
+  // Returns a shallow clone with the resolved title so the caller's original
+  // registration object is never mutated (its title may be a getter function
+  // that must survive re-registration for i18n reactivity). Consumers that
+  // need stable object identity for effect dependencies should key on
+  // panel.render rather than the panel object itself. Throw/empty fallback and
+  // per-id warning dedup live in the shared resolver.
+  return titleResolver.resolve(panel);
 }
 
 /** Current reactive snapshot for `useSyncExternalStore`. */
@@ -164,6 +197,7 @@ export function subscribeFloatingPanels(listener: () => void): () => void {
  */
 export function __resetFloatingPanelRegistryForTests(): void {
   registry.clear();
+  titleResolver.clear();
   listeners.clear();
   openIds = [];
   version = 0;
