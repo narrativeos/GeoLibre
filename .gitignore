@@ -39,6 +39,7 @@ htmlcov/
 coverage.xml
 .idea/
 .vscode/
+apps/geolibre-desktop/src-tauri/patches/
 *.tsbuildinfo
 **/src-tauri/gen/
 .playwright-cli/

@@ -55,3 +55,9 @@ getrandom = "0.4"
 # Runtime WebKitGTK version check (already an indirect dep via tauri/wry).
 [target."cfg(target_os = \"linux\")".dependencies]
 webkit2gtk-sys = "2"
+
+# rusqlite 0.40.1 和 libsqlite3-sys 0.38.1 使用了已移除的 nightly 宏 cfg_select!
+# 此处用本地修补版本替换（将 cfg_select! 替换为标准的 if cfg!()）
+[patch.crates-io]
+libsqlite3-sys = { path = "patches/libsqlite3-sys" }
+rusqlite = { path = "patches/rusqlite" }
